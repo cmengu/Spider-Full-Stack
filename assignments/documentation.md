@@ -406,27 +406,159 @@ Commit **`backend/tests/conftest.py`** and **`backend/tests/test_api.py`** toget
 
 ## Phase 3: Frontend data pipeline (Steps 12–16)
 
-**Goal:** Centralize **`COLOR_MAP`** in **`frontend/src/constants.js`**, implement **`buildPatientSeries`** in **`frontend/src/utils/transformData.js`** (pure transform with O(n+m) day‑0 detection, **`colorKey`** on each patient), and lock behavior with **Vitest** (**13** tests) before Phase 5 chart work.
+**Goal:** Build the frontend data layer before writing any UI. The API returns flat rows — one row per patient per timepoint. Plotly needs per-patient trace objects. This phase writes the pure transformation function that bridges the two, locks its behaviour with a Vitest suite, and separates rendering constants from data logic before Phase 5 makes everything visual.
 
 ### What was built
 
-| File | Role |
-|------|------|
-| **`frontend/vite.config.js`** | **`test.environment: 'jsdom'`** for Vitest; **`/api`** → Flask **5001** proxy (stale `// flag` comments removed). |
-| **`frontend/package.json`** | **`react-router-dom`**, **`react-plotly.js`**, **`plotly.js`**; dev:** **`vitest`**, **`@vitest/coverage-v8`**, **`jsdom`** (needed for **`jsdom`** test environment). **`"test": "vitest run"`**. |
-| **`frontend/src/constants.js`** | **`COLOR_MAP`** — arm+dose string → hex; single place for Phase 5/6. |
-| **`frontend/src/utils/transformData.js`** | **`buildPatientSeries(rows)`** — group by **`subject_id`**, inject **`{ weeks: 0, change: 0 }`** when no real day‑0 row, sort points and patients. |
-| **`frontend/src/utils/transformData.test.js`** | Contract + edge cases (string dose, day‑0 duplicate, sort orders, **`colorKey`** vs **`constants.js`**). |
+| File | Responsibility |
+|------|---------------|
+| `frontend/vite.config.js` | Added `test.environment: 'jsdom'`; removed stale `// flag` comment from proxy block |
+| `frontend/package.json` | `react-router-dom`, `react-plotly.js`, `plotly.js`; dev: `vitest`, `@vitest/coverage-v8`; `"test": "vitest run"` |
+| `frontend/src/constants.js` | `COLOR_MAP` — arm+dose string → hex color; single import point for Phase 5 and 6 |
+| `frontend/src/utils/transformData.js` | `buildPatientSeries(rows)` — groups flat API rows into per-patient DTOs with `colorKey` and sorted `points` |
+| `frontend/src/utils/transformData.test.js` | 13 Vitest tests covering grouping, metadata, type coercion, baseline injection, sort order, edge cases, and `colorKey` correctness |
+
+### Folder structure after Phase 3
+
+```
+frontend/src/
+├── constants.js                        ← new
+├── utils/
+│   ├── transformData.js                ← new
+│   └── transformData.test.js           ← new
+├── App.jsx                             # unchanged
+└── main.jsx                            # unchanged
+```
+
+### Decisions and rationale
+
+**`groupBySubject` renamed to `buildPatientSeries`**
+The original draft named the function `groupBySubject` but it does three things: groups rows by patient, injects a synthetic baseline point, and sorts both points and patients. The name was a lie — it implied a simple grouping operation when the function also injects domain-specific data and sorts. `buildPatientSeries` accurately describes the output: a series of patient objects ready for Plotly.
+
+**`COLOR_MAP` moved out of `transformData.js` into `constants.js`**
+The first draft exported `COLOR_MAP` from `transformData.js`. A transform module has no business knowing about hex colors — that is a rendering concern. More practically, `COLOR_MAP` is also consumed by `FilterPanel` (Phase 6) for legend rendering. If it lived in `transformData.js`, Phase 6 would import a rendering constant from a data module, creating a coupling that makes refactoring harder. `constants.js` is the single source of truth for all app-wide rendering constants.
+
+**`colorKey` computed once in `buildPatientSeries`, stored on the patient object**
+Each patient in the output carries a `colorKey` field: `` `ARM ${row.arm} ${row.dose} mg` ``. This matches `COLOR_MAP`'s key format exactly. Without this, `SpiderPlot` (Phase 5) would have to reconstruct the key string inline every time it renders a trace. That reconstruction is untestable in the transform suite — if the arm field format ever changed (e.g. `'A'` → `'Arm A'`), the chart would silently render with no colors and no error. Computing `colorKey` once in the transform and verifying it against `COLOR_MAP` in tests catches this class of bug before the chart exists.
+
+**O(n+m) baseline injection, not O(n×m)**
+The original baseline check used `rows.some(r => r.subject_id === patient.subject_id && Number(r.days) === 0)` inside the per-patient `forEach`. For each patient, this scans all rows — O(patients × rows). The correct approach builds a `Set` of day-zero subject IDs in one O(n) pass before the patient loop, then does O(1) `.has()` lookups per patient. Total: O(rows + patients). For 10 patients and 58 rows it makes no practical difference, but O(n×m) is the wrong algorithm when O(n+m) is trivial.
+
+**Baseline check uses `Number(r.days) === 0` not `p.weeks === 0`**
+After division (`days / 7`), exact float equality against `0` is technically fine for integer day values (`0 / 7 === 0`), but it is fragile — a future CSV with fractional-day entries could produce `0.001 / 7 = 0.000143`, which would fail the equality check and cause double-baseline injection. Checking the raw integer days value before division is the source of truth. The question the code is answering is "did a real day-0 measurement exist in the data?" — checking `r.days`, not the derived `p.weeks`, is the correct place to ask it.
+
+**`vitest environment: jsdom`, not `node`**
+Pure utility functions like `buildPatientSeries` have no browser API calls and could run in either environment. `node` was tempting because it is technically correct for today's tests and marginally faster. It was rejected because Phase 9 ("fill out remaining Vitest edge cases") will add component tests — those need `jsdom` for DOM access. Setting `node` now means either changing the global config later (one migration step) or adding `// @vitest-environment jsdom` at the top of every future component test file (boilerplate forever). `jsdom` works for both utility and component tests at zero cost today.
+
+**`react-plotly.js` + `plotly.js` over a lighter chart library**
+The assignment spec calls for a spider plot. Plotly has native support for the exact chart type, reference lines, hovertemplate, and responsive sizing the spec requires. A lighter library like recharts would require building those features manually. For a take-home where time is the constraint, Plotly is the right call despite the ~3 MB bundle size.
+
+**`@vitest/coverage-v8` installed but not enforced**
+Coverage is not part of Phase 3's success criteria. It is installed now so `--coverage` is available if needed later without a separate install step.
+
+### Why `buildPatientSeries` outputs `points` as a separate array
+
+The API returns flat rows. Plotly needs two parallel arrays per trace: `x` (weeks) and `y` (change). Storing both as `{weeks, change}` objects in a `points` array keeps the transform output self-contained — the chart component extracts x and y with two `.map()` calls:
+
+```js
+x: patient.points.map(p => p.weeks),
+y: patient.points.map(p => p.change),
+```
+
+The remaining fields — `arm`, `dose`, `tumor_type`, `colorKey`, `subject_id` — are metadata consumed by the filter panel, legend, hover tooltip, and patient count display. They never go into Plotly's `x`/`y` arrays. The shape was designed so each concern reads exactly what it needs and ignores the rest.
+
+### Test suite design — what was wrong with the first draft and why
+
+The first draft had 7 tests. After two rounds of senior review, the suite was expanded to 13. Changes made:
+
+**Fixed: syntax error in `withDayZero` fixture**
+The double-baseline test had an incomplete object literal — the file would fail to parse entirely, silently skipping the test and giving false confidence.
+
+**Fixed: magic strings replaced with named constants**
+`'08-201'`, `'08-202'`, `'08-203'` scattered across multiple tests were extracted to `S1`, `S2`, `S3` constants. A typo in one fixture row now fails at the constant definition, not silently at a `.find()` returning `undefined`.
+
+**Fixed: sort test was an indirect self-comparison**
+The original `expect(weeks).toEqual([...weeks].sort((a, b) => a - b))` checks "is the output sorted?" but not "are the values correct?". A function returning wrong week values in sorted order would pass. Replaced with explicit expected values: `expect(weeks[0]).toBe(0)`, `expect(weeks[1]).toBeCloseTo(47 / 7)`, `expect(weeks[2]).toBeCloseTo(101 / 7)`.
+
+**Added: patient structure test (not just count)**
+The original `toHaveLength(2)` only verified count. A function returning `[null, null]` would pass. Added `toMatchObject` asserting all five fields — `subject_id`, `arm`, `dose`, `tumor_type`, `colorKey` — are present and correct on the patient object.
+
+**Added: metadata field correctness for each patient**
+No test verified that `arm`, `dose`, `tumor_type` were correctly assigned. A grouping bug that swapped patient metadata would pass the entire original suite. Added a dedicated test asserting S2's metadata is `arm: 'B'`, `dose: 3000`, `tumor_type: 'HNSCC'`.
+
+**Added: dose type coercion test**
+`Number(row.dose)` is in the code specifically because the API could return dose as a string. No test asserted `typeof patient.dose === 'number'`. If that coercion broke, Phase 5 would receive string doses and the sort comparator `a.dose - b.dose` would silently return `NaN`, breaking patient ordering.
+
+**Added: single-timepoint patient test**
+No test covered a patient with exactly one real measurement. After baseline injection, they should have exactly two points. Without this test, an off-by-one in the injection logic could produce a patient with only a baseline and no measurements — visually a dot, not a line.
+
+**Added: `colorKey` → `COLOR_MAP` cross-check**
+`buildPatientSeries` produces `colorKey` values. `COLOR_MAP` in `constants.js` is what `SpiderPlot` will look up. Without a test that imports both and asserts `COLOR_MAP[patient.colorKey]` is defined, a typo in either file would pass all transform tests and only fail visually in Phase 5.
 
 ### Verification
 
 ```bash
 cd frontend && npm test
-# or: npx vitest run
 ```
 
-Expect **13** tests passed. **`App.jsx` / `main.jsx`** unchanged in Phase 3 per plan.
+Expected output:
+```
+ ✓ src/utils/transformData.test.js (13)
 
-### Git checkpoint (Phase 3)
+Test Files  1 passed (1)
+     Tests  13 passed (13)
+```
 
-Separate commits per plan: Step 12 (deps + Vite), Step 13 (**`constants.js`**), Step 14 (**`transformData.js`**), Step 15 (**`transformData.test.js`**), Step 16 (this documentation block).
+### Git checkpoints (Phase 3)
+
+One commit per step — do not batch:
+
+```
+step 12: install react-router-dom, plotly, vitest; jsdom env; clean proxy comment
+step 13: add constants.js with COLOR_MAP
+step 14: write buildPatientSeries — colorKey, O(n+m) baseline check, JSDoc
+step 15: 13 vitest cases — structure, metadata, type coercion, colorKey, edge cases
+docs: Phase 3 — transformData, constants, Vitest suite
+```
+
+---
+
+## Phase 4: Bootstrap — Tailwind, Router, Navbar (Steps 15b–18)
+
+**Goal:** Remove unused Vite scaffold assets, add **Tailwind CSS v4** (`@tailwindcss/vite`, `@import "tailwindcss"` as **first line** of `index.css`), mount **`BrowserRouter`** in **`main.jsx`**, declare **`/`** and **`/visualisation`** (British spelling) with **`Landing`** / **`Visualisation`** stubs, then add a persistent **`Navbar`** (`Link` + **`NavLink`** with `className={({ isActive }) => ...}`) **above** `<Routes>` in **`App.jsx`**.
+
+### What was built
+
+| Step | Change |
+|------|--------|
+| **15b** | Deleted **`App.css`**, **`assets/react.svg`**, **`assets/vite.svg`** (no imports in `src/`). **`hero.png`** kept. |
+| **16** | **`tailwindcss`**, **`@tailwindcss/vite`**; **`vite.config.js`** → `plugins: [tailwindcss(), react()]`; **`index.css`** prepended with `@import "tailwindcss";` |
+| **17** | **`BrowserRouter`** wraps **`App`** in **`main.jsx`**; **`App.jsx`** → `<Routes>` + stubs in **`pages/Landing.jsx`**, **`pages/Visualisation.jsx`** |
+| **18** | **`components/Navbar.jsx`**; **`App.jsx`** fragment with **`<Navbar />`** then **`<Routes>`** |
+
+### Decisions (from plan)
+
+- **Router in `main.jsx`**, not `App.jsx`, so **`App`** stays testable with a **`MemoryRouter`** when needed.
+- **`NavLink`** callback for active styling — no **`useLocation`** + manual path compare.
+- **Navbar above routes** — not duplicated inside each page.
+- **Plugin order** `tailwindcss()` before `react()` per Tailwind v4 convention.
+
+### Verification
+
+```bash
+cd frontend && npm test    # 13 passed
+cd frontend && npm run lint
+cd frontend && npm run build
+```
+
+Browser (with **`npm run dev`**): **`/`** shows **Landing**; **`/visualisation`** shows **Visualisation**; Navbar and active link styling on both.
+
+### Git checkpoints (Phase 4)
+
+```
+step 15b: delete Vite scaffold dead files — App.css, react.svg, vite.svg not imported anywhere
+step 16: install tailwind v4, wire @tailwindcss/vite plugin, @import as first line of index.css
+step 17: BrowserRouter in main.jsx, two-route App.jsx, Landing and Visualisation stubs
+step 18: Navbar with NavLink isActive callback, mounted above Routes in App.jsx
+```
+
