@@ -722,3 +722,115 @@ Files returning `0` are unreferenced. This replaces the name-based approach with
 
 **Principle documented:** The "Self-Contained Rule" in the plan template is designed for steps that create new files or perform full rewrites. Additive steps should use Edit semantics — minimum change, verified-unique anchor, no full-file replacement.
 
+---
+
+## Code Review — Technical Debt Pass (post-Phase 4)
+
+A senior-level review of the codebase after Phase 4 identified several issues across CSS infrastructure, test quality, and code correctness. The following documents each issue, the fix applied, and the reasoning. Items that were investigated and deliberately left unchanged are also noted.
+
+---
+
+### Fix 1 — `index.css`: Dead portfolio-template CSS removed
+
+**Issue:** `index.css` contained rules and variables with no corresponding HTML anywhere in the project: `#social .button-icon`, `.counter`, `code { ... }`, and CSS custom properties `--accent` (purple), `--accent-bg`, `--accent-border`, `--social-bg`, `--shadow`, `--code-bg`. These originated from a personal portfolio template and were never removed. The purple `#aa3bff` accent colour had no relation to the pink/blue clinical palette in `COLOR_MAP`. The `--heading` variable was set to the same font stack as `--sans` — two names for one value.
+
+**Fix applied:**
+- Removed `--color-accent` from the `@theme` block
+- Removed `--code-bg`, `--accent`, `--accent-bg`, `--accent-border`, `--social-bg`, `--shadow`, `--heading`, `--mono` from `:root`
+- Removed the same dead variables from the `@media (prefers-color-scheme: dark)` `:root` block
+- Removed `#social .button-icon { filter: invert(1) brightness(2); }` from the dark mode block
+- Removed the `code, .counter { ... }` and `code { ... }` rule blocks
+- Replaced `var(--heading)` in `h1, h2` with `var(--sans)` — the `--heading` variable is deleted
+
+**What stays:** `--text`, `--text-h`, `--bg`, `--border`, dark mode overrides for those four, font smoothing, `#root` layout, and heading/paragraph base styles. Every remaining rule has a corresponding rendered element.
+
+---
+
+### Fix 2 — `backend/app.py`: `debug=True` replaced with environment variable
+
+**Issue:** `app.run(port=5001, debug=True)` in source code unconditionally enables Flask's interactive debugger. On a shared or networked machine this exposes a PIN-protected Python shell to anyone who can reach port 5001. Hardcoding a security-relevant flag in source bypasses the environment separation that `.env` files exist to provide.
+
+**Fix applied:**
+```python
+app.run(port=5001, debug=os.environ.get('FLASK_DEBUG', 'false').lower() == 'true')
+```
+`import os` added at the top of `app.py`. Default is `false` — debug mode must be explicitly opted into via the environment. Set `FLASK_DEBUG=true` in `backend/.env` for local development.
+
+---
+
+### Fix 3 — `frontend/src/utils/transformData.js`: `colorKey` now uses coerced dose
+
+**Issue:** The `colorKey` string was constructed from `row.dose` (raw API value) while the `dose` property was set to `Number(row.dose)` (coerced). Both happen to produce the same string today because the API returns dose as an integer. But they are derived from different sources — if the raw value ever arrived as a float (`1800.0`) or edge-case string, `row.dose` and `Number(row.dose)` could produce different string representations.
+
+**Fix applied:**
+```js
+const dose = Number(row.dose)
+grouped[key] = {
+  dose,
+  colorKey: `ARM ${row.arm} ${dose} mg`,
+  ...
+}
+```
+`dose` and `colorKey` are now guaranteed to be derived from the same coerced value.
+
+**JSDoc comment also corrected:** The algorithm comment previously claimed "O(n+m)" complexity. The actual implementation is three sequential O(n) passes (Set build → group → inject/sort). The comment was updated to reflect this accurately.
+
+---
+
+### Fix 4 — `backend/tests/test_api.py`: Redundant and mislabelled tests removed or renamed
+
+**Three tests deleted** (redundant coverage):
+
+| Deleted test | Reason |
+|---|---|
+| `test_empty_intersection_is_not_404` | `test_empty_intersection_returns_200_with_empty_array` already asserts `status_code == 200`, making the `!= 404` assertion on the same URL redundant |
+| `test_invalid_param_never_returns_500` | A loop over 4 URLs already individually tested by `test_invalid_arm_returns_400`, `test_invalid_dose_non_integer_returns_400`, etc. |
+| `test_duplicate_arm_param_uses_first_value` | Tests `flask.request.args.get()` framework behaviour, not application logic |
+
+**Three tests renamed** (mislabelled as security tests):
+
+| Old name | New name | Reason for rename |
+|---|---|---|
+| `test_sql_injection_in_arm_returns_400_not_500` | `test_special_characters_in_arm_returns_400` | No SQL exists in this app — calling it a SQL injection test misrepresents the threat model. The actual behaviour being tested is "special characters in arm param are rejected by validation." |
+| `test_xss_attempt_in_tumor_type_returns_400` | `test_html_characters_in_tumor_type_returns_400` | XSS requires rendering user input as HTML. Flask's `jsonify` does not do this. The test verifies input rejection, not XSS defence. |
+| `test_injection_error_response_body_is_valid_json` | `test_invalid_tumor_type_error_is_valid_json` | Name now reflects what it actually tests. |
+
+**Result:** 40 tests (down from 43). All 40 pass.
+
+---
+
+### Fix 5 — `frontend/src/utils/transformData.test.js`: Misleading constant names corrected
+
+**Issue:** `S2 = '08-203'` and `S3 = '08-202'` implied an alphanumeric ordering that the values did not follow (203 > 202, yet S2 < S3 by name). A reader scanning the fixture would assume S1 < S2 < S3 by patient ID, which is incorrect.
+
+**Fix applied:** Renamed to semantically meaningful identifiers:
+```js
+const S1       = '08-201'  // arm A, dose 1800, sqNSCLC — primary test patient
+const PATIENT_B  = '08-203'  // arm B, dose 3000, HNSCC
+const PATIENT_A2 = '08-202'  // arm A, dose 3000, sqNSCLC — multi-dose sort test only
+```
+All usages updated throughout the file. All 18 Vitest tests pass.
+
+---
+
+### Fix 6 — `backend/tests/test_data.py`: Snapshot nature of row-count test documented
+
+**Issue:** `assert len(df) == 58` is a snapshot assertion against the committed CSV, not a test of `load_data()`'s behaviour. If the CSV is updated with new patients, this test fails with no indication of whether the loading function is broken or the data simply changed.
+
+**Fix applied:** Comment added above the assertion:
+```python
+# Data integrity snapshot — tests the committed CSV, not load_data() behaviour.
+# If spiderplot.csv is updated with new patients, update these counts to match.
+```
+The assertion is retained — the CSV is fixed for this take-home and the snapshot is a valid data integrity check. The comment makes the intent explicit so a future reader knows to update the number rather than investigate a bug in the loading logic.
+
+---
+
+### Investigated and intentionally left unchanged
+
+**`days` returned as string from the API:** Reviewed against the assignment spec. The JSON example explicitly shows `"days": "47"` with string quotes. The implementation matches the spec. The test `test_days_is_string_not_int` is correct.
+
+**`sys.path.insert` in `app.py`:** Acknowledged as a workaround for the absence of `pyproject.toml` or `backend/__init__.py`. Left in place — fixing it requires adding packaging infrastructure that is outside the scope of this take-home. Documented here as known technical debt.
+
+**Filtering model (client-side vs server-side):** The roadmap stated client-side filtering; the API implements server-side filter params; Phase 6 will add client-side filtering on top. Decision: the frontend will always fetch all rows on mount and filter in memory. The dataset is bounded by clinical trial scale (sub-1000 rows) and a server round-trip on every filter change adds latency with no benefit at this data size. The API filter params are kept as documented in the spec and remain available for future consumers or pagination needs — the frontend simply does not use them. No code change required; this note closes the documentation gap.
+
