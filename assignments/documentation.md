@@ -562,3 +562,15 @@ step 17: BrowserRouter in main.jsx, two-route App.jsx, Landing and Visualisation
 step 18: Navbar with NavLink isActive callback, mounted above Routes in App.jsx
 ```
 
+### Steps 19–21: Landing page (phrase4 plan)
+
+| Step | Deliverable |
+|------|-------------|
+| **19** | **`components/SummaryCard.jsx`** — `title` + `value`, Tailwind card, `text-left` |
+| **20** | **`pages/Landing.jsx`** — `useEffect` fetch **`/api/spider`**, `rows` / `loading` / `error`, **`deriveStats`** (module-level), three **`SummaryCard`**s with **`…`** while loading |
+| **21** | **`Link`** CTA to **`/visualisation`** (`Explore Spider Plot →`) |
+
+**Git checkpoints:** `step 19: add SummaryCard…`, `step 20: Landing — fetch…`, `step 21: CTA Link…`
+
+Verify with backend on **5001**: cards show **10**, **A, B**, **1800mg, 3000mg**; Vitest stays **13** passed.
+
