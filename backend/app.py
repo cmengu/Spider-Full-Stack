@@ -26,8 +26,8 @@ VALID_ARMS = {str(a) for a in df['arm'].unique()}
 VALID_DOSES = {int(d) for d in df['dose'].unique()}
 VALID_TUMORS = {str(t) for t in df['tumor_type'].unique()}
 
-# Exactly the 6 columns the assignment spec requires
-RESPONSE_COLUMNS = ['subject_id', 'arm', 'days', 'change', 'dose', 'tumor_type']
+# Fixed response shape — tuple so accidental mutation cannot add columns silently
+RESPONSE_COLUMNS = ('subject_id', 'arm', 'days', 'change', 'dose', 'tumor_type')
 
 print(f'[startup] Loaded {len(df)} rows, {df["subject_id"].nunique()} patients')
 print(f'[startup] Valid: arms={sorted(VALID_ARMS)} doses={sorted(VALID_DOSES)} tumors={sorted(VALID_TUMORS)}')
@@ -42,31 +42,41 @@ def spider():
     filtered = df  # reference only — boolean indexing below never mutates df
 
     if arms:
-        arm_list = [a.strip() for a in arms.split(',')]
-        invalid = set(arm_list) - VALID_ARMS
-        if invalid:
-            return jsonify({'error': f'Invalid arms: {sorted(invalid)}'}), 400
-        filtered = filtered[filtered['arm'].isin(arm_list)]
+        # Drop empty tokens so trailing commas (?arms=A, or ?arms=,) do not 400
+        arm_list = [a.strip() for a in arms.split(',') if a.strip()]
+        if arm_list:
+            invalid = set(arm_list) - VALID_ARMS
+            if invalid:
+                return jsonify({'error': f'Invalid arms: {sorted(invalid)}'}), 400
+            filtered = filtered[filtered['arm'].isin(arm_list)]
 
     if doses:
-        try:
-            dose_list = [int(d.strip()) for d in doses.split(',')]
-        except ValueError:
-            return jsonify({'error': 'Doses must be integers'}), 400
-        invalid = set(dose_list) - VALID_DOSES
-        if invalid:
-            return jsonify({'error': f'Invalid doses: {sorted(invalid)}'}), 400
-        filtered = filtered[filtered['dose'].isin(dose_list)]
+        dose_list = [
+            d.strip() for d in doses.split(',') if d.strip()
+        ]
+        if dose_list:
+            try:
+                dose_list = [int(d) for d in dose_list]
+            except ValueError:
+                return jsonify({'error': 'Doses must be integers'}), 400
+            invalid = set(dose_list) - VALID_DOSES
+            if invalid:
+                return jsonify({'error': f'Invalid doses: {sorted(invalid)}'}), 400
+            filtered = filtered[filtered['dose'].isin(dose_list)]
 
     if tumor_types:
-        tumor_list = [t.strip() for t in tumor_types.split(',')]
-        invalid = set(tumor_list) - VALID_TUMORS
-        if invalid:
-            return jsonify({'error': f'Invalid tumor types: {sorted(invalid)}'}), 400
-        filtered = filtered[filtered['tumor_type'].isin(tumor_list)]
+        tumor_list = [
+            t.strip() for t in tumor_types.split(',') if t.strip()
+        ]
+        if tumor_list:
+            invalid = set(tumor_list) - VALID_TUMORS
+            if invalid:
+                return jsonify({'error': f'Invalid tumor types: {sorted(invalid)}'}), 400
+            filtered = filtered[filtered['tumor_type'].isin(tumor_list)]
 
     # .copy() here is correct — we mutate result (days, change columns) below
-    result = filtered[RESPONSE_COLUMNS].copy()
+    # list() — pandas treats a tuple of labels as one MultiIndex key, not multiple columns
+    result = filtered[list(RESPONSE_COLUMNS)].copy()
     result['days'] = result['days'].astype(int).astype(str)
     result['change'] = result['change'].round(6)
 
