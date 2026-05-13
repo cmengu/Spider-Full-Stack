@@ -123,7 +123,7 @@ HTTP (routes, query params, `jsonify`) stays in `app.py`; CSV semantics, types, 
 A path like `'backend/spiderplot.csv'` depends on the process **current working directory**. If someone runs Flask from `backend/` vs repo root, a relative path breaks. Resolving from `__file__` is **zero CWD dependency**: the CSV always sits next to `data.py`.
 
 **Explicit copy: `assignment/spiderplot.csv` → `backend/spiderplot.csv`**  
-The plan calls out that “copy the file” must be a real subtask, not a vague note. The app’s contract is “CSV next to `data.py` in `backend/`.”
+The plan calls out that “copy the file” must be a real subtask, not a vague note. The app’s contract is “CSV next to `data.py` in `backend/`.” Also decided to just put the csv file in the root folder because its jsut one file, if there are multiple i will create a data folder instead. 
 
 **Fail-fast schema check — `REQUIRED_COLUMNS - set(df.columns)`**  
 If the CSV is swapped or renamed, failing at the top of `load_data()` with a clear `ValueError` beats a cryptic `KeyError` deep in `dropna()`.
@@ -177,3 +177,78 @@ cd backend && ./venv/bin/pytest -v
 First commit for this step included **`backend/data.py`** and **`backend/spiderplot.csv`** only (per plan: no `app.py` wiring in the same batch).
 
 **Follow-up:** `pytest`, `pytest.ini`, and `backend/tests/test_data.py` were added so `cd backend && ./venv/bin/pytest -v` is repeatable before the API route consumes `load_data()`.
+
+---
+
+## Step 9: `GET /spider` — wire `data.py` into Flask (`app.py`)
+
+**Goal:** Replace the Phase 1 stub with a real **`GET /spider`** that reads the cleaned DataFrame from **`load_data()`**, accepts **`arms`**, **`doses`**, and **`tumor_types`** as comma-separated query parameters, validates them against values **derived from the loaded data**, and returns JSON that matches the assignment contract (six columns only, correct types, sensible HTTP errors).
+
+### What was built
+
+- **Startup load** — `df = load_data()` once at import time (inside `try`/`except` with a short printed hint if the CSV is missing, then re-raise). Startup logs print row count, patient count, and sorted **`VALID_*`** sets for quick sanity checks.
+- **Query parameters** — `arms`, `doses`, `tumor_types` are optional; each may list multiple values separated by commas. Filters are applied in sequence on the same working **`filtered`** slice (logical AND across dimensions).
+- **Validation** — Unknown arms, doses, or tumor types return **400** with **`jsonify({'error': '...'})`**. Dose tokens that are not valid integers after stripping return **400** (`Doses must be integers`). Valid filters that match no rows return **200** with **`[]`** (empty intersection is not an error).
+- **Response shape** — Exactly six fields per object: `subject_id`, `arm`, `days`, `change`, `dose`, `tumor_type`. Extra columns from the CSV (`first_dose`, `date`, `response`, etc.) never appear in the payload. **`days`** is serialized as a **string** (via `astype(int).astype(str)`). **`change`** is rounded to six decimal places for stable JSON.
+- **Edge case: trailing commas and blank tokens** — Tokens are parsed with `if segment.strip()` so natural typos like `?arms=A,` or `?doses=1800,` do not produce empty entries, spurious **400**s, or `int('')`. If every token is empty after stripping (e.g. `?arms=,`), the filter is **skipped** (same as omitting the parameter). An inner **`if arm_list:`** / **`if dose_list:`** / **`if tumor_list:`** ensures we never call **`.isin([])`**, which would incorrectly return zero rows.
+- **Constants** — **`RESPONSE_COLUMNS`** is a **tuple** (fixed contract, not accidentally mutable). Pandas column indexing uses **`filtered[list(RESPONSE_COLUMNS)]`** because a **tuple of column names** in **`df[tuple]`** is interpreted as a **single MultiIndex label**, not as multiple columns.
+
+### Decisions and rationale (Step 9 plan + follow-ups)
+
+**Explicit `sys.path.insert(0, str(Path(__file__).parent))` before `from data import load_data`**  
+Flask’s CLI may add the app directory to `sys.path`, but that is not something to rely on for `python app.py`, one-off scripts, or pytest importing the app module. Making the import path explicit keeps **`from data import load_data`** working from repo root, `backend/`, and tests.
+
+**`VALID_ARMS`, `VALID_DOSES`, `VALID_TUMORS` derived from `df`, not literals**  
+The set of legal filter values is a fact about the cleaned dataset. Duplicating it in `app.py` would eventually drift from `data.py`. Sets use **`str(...)`** and **`int(...)`** so membership checks use plain Python types (**`numpy.int64`** in sets is awkward for JSON and comparisons).
+
+**`filtered = df` per request; copy only when building the response**  
+The route does **not** copy the full frame on every request. Boolean indexing returns a view-backed slice; **`filtered[...].copy()`** is used only for the small result so mutating **`days`** / **`change`** does not touch the shared **`df`**.
+
+**Tumor filter must apply `isin(tumor_list)`**  
+Validating `tumor_types` but forgetting to filter the frame would return all rows — a silent, hard-to-spot bug. The plan called this out explicitly; the implementation always narrows **`filtered`** when **`tumor_list`** is non-empty.
+
+**Error payloads use `sorted(invalid)`**  
+Sets in f-strings look like Python **`{...}`** in JSON; sorting gives a predictable, API-friendly list in the message text.
+
+**Integration verification script hygiene**  
+When Flask is started in the background for curl-based checks, a bash **`trap 'kill $FLASK_PID' EXIT`** immediately after **`FLASK_PID=$!`** ensures the server is torn down on success, failed **`assert`**, or **Ctrl-C**, avoiding **“address already in use”** on the next run.
+
+**Row counts in manual checks are dataset-dependent**  
+For example, **`?tumor_types=HNSCC`** returns **every** HNSCC row in the **committed** CSV — the plan once assumed a smaller count from an older slice of the data. Verification should assert **correct filtering** (e.g. all returned rows have `tumor_type == 'HNSCC'`) and/or compare counts to **`load_data()`**, not a hard-coded row count tied to a specific CSV revision.
+
+### Folder structure after Step 9
+
+`backend/app.py` is the only application file that changes in this step; **`data.py`**, CSV, and tests stay as in Step 8.
+
+```
+backend/
+├── app.py              # GET /spider — load_data(), filters, validation, jsonify
+├── data.py
+├── spiderplot.csv
+├── tests/
+│   └── test_data.py
+└── ...
+```
+
+### Verification
+
+**Flask test client (no server port):** import **`app`** with **`sys.path.insert(0, 'backend')`**, then **`app.test_client().get('/spider?...')`** to assert status codes, column keys, **`days`** type, and dynamic filter counts against **`app.df`**.
+
+**Manual / plan-style checks** (from repo root, with venv):
+
+```bash
+backend/venv/bin/flask --app backend/app run --port 5001 &
+FLASK_PID=$!
+trap "kill $FLASK_PID 2>/dev/null" EXIT
+until curl -s http://localhost:5001/spider > /dev/null 2>&1; do sleep 0.3; done
+
+curl -s "http://localhost:5001/spider" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d)==58"
+curl -s "http://localhost:5001/spider?arms=Z" -o /dev/null -w "%{http_code}\n"   # expect 400
+curl -s "http://localhost:5001/spider?arms=A&doses=3000" | python3 -c "import sys,json; assert json.load(sys.stdin)==[]"
+```
+
+Existing data tests still apply: **`cd backend && ./venv/bin/pytest -v`**.
+
+### Git checkpoint (Step 9)
+
+Commit **`backend/app.py`** after the route matches the contract (Step 9 plan: do not batch with the next frontend milestone unless the roadmap says otherwise).
