@@ -6,6 +6,8 @@ import data as data_module
 
 
 def test_load_data_returns_expected_row_and_patient_counts():
+    # Data integrity snapshot — tests the committed CSV, not load_data() behaviour.
+    # If spiderplot.csv is updated with new patients, update these counts to match.
     assert data_module.CSV_PATH.exists(), 'backend/spiderplot.csv must exist'
     df = data_module.load_data()
     assert len(df) == 58

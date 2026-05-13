@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 from pathlib import Path
@@ -84,4 +85,4 @@ def spider():
 
 
 if __name__ == '__main__':
-    app.run(port=5001, debug=True)
+    app.run(port=5001, debug=os.environ.get('FLASK_DEBUG', 'false').lower() == 'true')

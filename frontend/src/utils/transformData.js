@@ -19,12 +19,10 @@
 /**
  * Transforms flat API rows into per-patient series ready for Plotly.
  *
- * Steps applied:
- *   1. Build a Set of subject IDs that have a real day-0 row (O(n) pass)
- *   2. Group rows by subject_id
- *   3. Inject synthetic baseline {weeks:0, change:0} for patients without a day-0 row
- *   4. Sort each patient's points ascending by weeks
- *   5. Sort patients by arm (A before B), then by dose ascending within arm
+ * Steps applied (three sequential O(n) passes):
+ *   1. Build a Set of subject IDs that have a real day-0 row
+ *   2. Group rows by subject_id, convert days→weeks, coerce dose to number
+ *   3. Inject synthetic baseline {weeks:0, change:0} for patients without one, then sort
  *
  * @param {Object[]|null|undefined} rows - Raw rows from GET /spider
  * @returns {PatientSeries[]}
@@ -43,12 +41,13 @@ export function buildPatientSeries(rows) {
   rows.forEach(row => {
     const key = row.subject_id
     if (!grouped[key]) {
+      const dose = Number(row.dose)
       grouped[key] = {
         subject_id: row.subject_id,
         arm: row.arm,
-        dose: Number(row.dose),
+        dose,
         tumor_type: row.tumor_type,
-        colorKey: `ARM ${row.arm} ${row.dose} mg`,
+        colorKey: `ARM ${row.arm} ${dose} mg`,
         points: [],
       }
     }

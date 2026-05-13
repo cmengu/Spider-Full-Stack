@@ -531,7 +531,7 @@ docs: Phase 3 — transformData, constants, Vitest suite
 
 | Step | Change |
 |------|--------|
-| **15b** | Deleted **`App.css`**, **`assets/react.svg`**, **`assets/vite.svg`** (no imports in `src/`). **`hero.png`** kept. |
+| **15b** | Deleted **`App.css`**, **`assets/react.svg`**, **`assets/vite.svg`** (no imports in `src/`). **`hero.png`** removed in Phase 4 senior review pass (zero importers confirmed by grep). |
 | **16** | **`tailwindcss`**, **`@tailwindcss/vite`**; **`vite.config.js`** → `plugins: [tailwindcss(), react()]`; **`index.css`** prepended with `@import "tailwindcss";` |
 | **17** | **`BrowserRouter`** wraps **`App`** in **`main.jsx`**; **`App.jsx`** → `<Routes>` + stubs in **`pages/Landing.jsx`**, **`pages/Visualisation.jsx`** |
 | **18** | **`components/Navbar.jsx`**; **`App.jsx`** fragment with **`<Navbar />`** then **`<Routes>`** |
@@ -566,11 +566,159 @@ step 18: Navbar with NavLink isActive callback, mounted above Routes in App.jsx
 
 | Step | Deliverable |
 |------|-------------|
-| **19** | **`components/SummaryCard.jsx`** — `title` + `value`, Tailwind card, `text-left` |
-| **20** | **`pages/Landing.jsx`** — `useEffect` fetch **`/api/spider`**, `rows` / `loading` / `error`, **`deriveStats`** (module-level), three **`SummaryCard`**s with **`…`** while loading |
+| **19** | **`components/SummaryCard.jsx`** — `title` + `value`, JSDoc `@param` contract, Tailwind card, `text-left` |
+| **20** | **`pages/Landing.jsx`** — `AbortController` fetch, early returns per state, `useMemo` + exported `deriveStats`, three **`SummaryCard`**s |
 | **21** | **`Link`** CTA to **`/visualisation`** (`Explore Spider Plot →`) |
 
 **Git checkpoints:** `step 19: add SummaryCard…`, `step 20: Landing — fetch…`, `step 21: CTA Link…`
 
-Verify with backend on **5001**: cards show **10**, **A, B**, **1800mg, 3000mg**; Vitest stays **13** passed.
+Verify with backend on **5001**: cards show **10**, **A, B**, **1800mg, 3000mg**; Vitest stays **18** passed (13 transform + 5 deriveStats).
+
+---
+
+## Phase 4, Steps 19–21: Senior Review — 10 Issues Identified and Resolved
+
+After the initial plan was drafted a senior review pass found 10 issues across CSS infrastructure, component contracts, state management, and plan process. Each is documented below: the original issue, why the naïve fix is insufficient, and the resolution actually applied.
+
+---
+
+### Item 1 — No `AbortController` on the fetch
+
+**Issue:** The original `useEffect` had no cleanup function. React 18 `StrictMode` deliberately unmounts and remounts every component in development — the first fetch fires, React unmounts, React remounts, the second fetch fires. With no abort, the first fetch continues in-flight and calls `setRows` on a component instance that has been discarded.
+
+**Why the naïve fix falls short:** Adding `AbortController` with a `finally(() => setLoading(false))` cleanup still fires `setLoading` on the abort path — calling state setters on an unmounted component, which is the exact problem being fixed. `finally` runs unconditionally; that includes the abort.
+
+**Resolution applied:** `setLoading(false)` was moved out of `finally` into the explicit success `.then` and the non-abort `.catch` branch. The abort path returns early with no state calls. The cleanup function `() => controller.abort()` is the return value of `useEffect`.
+
+```js
+// abort path — no state calls
+.catch(err => {
+  if (err.name === 'AbortError') return
+  setError(err.message)
+  setLoading(false)
+})
+return () => controller.abort()
+```
+
+---
+
+### Item 2 — Error state rendered wrong card values
+
+**Issue:** The render used `loading ? '…' : stats.X` as the guard for card values. After a fetch failure, `loading = false` and `rows = []`, so `deriveStats([])` returned `{patients: 0, arms: '', doses: ''}`. Cards rendered `0`, empty string, empty string — wrong values with no visual error indication beyond the error message above them.
+
+**Why the naïve fix falls short:** The three-state ternary `loading ? '…' : error ? 'N/A' : stats.X` repeated across three cards is a DRY violation embedded in JSX. Adding a fourth state later (e.g. stale data) requires touching all three cards.
+
+**Resolution applied:** Early returns. Three explicit render branches — loading, error, success — each with a self-contained `return`. The success path has no conditional logic; `stats` is guaranteed valid. Layout shell (`<main className="px-8 py-12">`) is identical across all three branches so the page does not shift during state transitions.
+
+---
+
+### Item 3 — `constants/colorMap.js` path was stale in two places
+
+**Issue:** The roadmap plan (`.claude/plans/roadmap.md`) and Claude's memory file both documented the `COLOR_MAP` file as `frontend/src/constants/colorMap.js`. The actual file created in Phase 3 was `frontend/src/constants.js`. If Phase 5 imported from `'../constants/colorMap'` it would get a module-not-found error with no obvious cause.
+
+**Why the naïve fix falls short:** Renaming the file to match the stale doc would break the existing test import `import { COLOR_MAP } from '../constants'` and add unnecessary churn. The file is already in the right place.
+
+**Resolution applied:** Both documents updated to `constants.js`. The file was not moved — the document was the error. File paths in design documents rot; the interface (`COLOR_MAP`, key format) is what matters to document.
+
+---
+
+### Item 4 — `deriveStats` not exported, not memoised, not tested
+
+**Three separate problems that compound each other:**
+
+**Not exported:** `deriveStats` was a module-level unexported function. No test could import it directly. Any derivation bug would only surface visually in the browser.
+
+**Not memoised:** Called on every render. When `loading = true` and `rows = []`, it ran and allocated throwaway `Set` objects on every re-render. The dependency contract — "only recalculate when `rows` changes" — was invisible in the code.
+
+**Not tested:** The critical edge case — `Number(r.dose)` deduplicating the string `"1800"` and the number `1800` as the same dose — had no test. If that coercion broke, the Dose Levels card would silently show `1800mg, 1800mg`.
+
+**Resolution applied:** `deriveStats` named-exported from `Landing.jsx`. `frontend/src/pages/landing.test.js` created with five tests: patient count, arm sort, dose format, string/number dose deduplication, and empty input safe values. `useMemo(() => deriveStats(rows), [rows])` wired in the component. Tests written before the component was wired — test output was the verification that export + logic were correct. Vitest count: 13 → 18.
+
+---
+
+### Item 5 — Two CSS design systems not bridged
+
+**Issue:** `index.css` defined custom CSS variables (`--text`, `--text-h`, `--border`, `--accent`). Components used Tailwind's built-in grays (`text-gray-600`, `border-gray-200`). The two systems were not synchronised — changing `--text-h` would not affect any component using `text-gray-900`.
+
+**Why the naïve fix falls short:** "Pick one system" means either rewriting all component classes to use CSS variables (no Tailwind tooling benefit) or deleting the CSS variables (losing the dark mode override system in the existing `prefers-color-scheme` block).
+
+**Resolution applied:** Tailwind v4's `@theme` block bridges the two without choosing either:
+
+```css
+@theme {
+  --color-brand-text:    #6b6375;
+  --color-brand-heading: #08060d;
+  --color-brand-border:  #e5e4e7;
+  --color-accent:        #aa3bff;
+}
+```
+
+`text-brand-text`, `border-brand-border`, `text-brand-heading`, `text-accent` are now valid Tailwind utility classes referencing the design system values. Existing components using Tailwind grays continue to work. Phase 8 polish can migrate incrementally.
+
+**Dark mode note:** `@theme` tokens compile to static values, not CSS variable references. Full dark mode support via Tailwind utilities would require `dark:` variants per component. For this project, dark mode is handled via the existing `prefers-color-scheme: dark` `:root` override block. The `@theme` tokens cover light mode component styling only.
+
+---
+
+### Item 6 — `font: 18px` on `:root` silently skewed all Tailwind `rem` values
+
+**Issue:** `font: 18px/145% var(--sans)` in `:root` set the CSS base font size to 18px. Tailwind's default rem scale assumes `1rem = 16px`. With an 18px base: `text-sm` resolved to 15.75px, `p-6` to 27px, `gap-4` to 18px — every rem-based utility was off by 12.5%.
+
+**Why the naïve fix falls short:** Simply changing `font-size: 18px` to `font-size: 16px` on `:root` loses the intended 18px body text size. The issue is not the size itself but where it is set: `:root` affects the `rem` scale; `body` does not.
+
+**Resolution applied:** `font-size`, `line-height`, `font-family`, and the responsive `@media (max-width: 1024px) { font-size: 16px }` were moved from `:root` to `body`. The `:root` block retains only CSS variable declarations and rendering-hint properties (`color-scheme`, `font-synthesis`, etc.). `rem` is now based on the browser default 16px; body text is rendered at 18px.
+
+---
+
+### Item 7 — `text-align: center` on `#root` was implicit layout behaviour
+
+**Issue:** The Vite scaffold default left `text-align: center` on the `#root` div. All child text centred by default — including error messages, subtitles, and the CTA button — without any visible indication in the component JSX. `SummaryCard` had `text-left` to fight this, but the override made sense only if you knew about the global rule.
+
+**Why the naïve fix falls short:** Removing it blindly without auditing dependents causes visual regressions. The page title and subtitle were centred by this rule and needed `text-center` added explicitly before the global rule was removed.
+
+**Resolution applied:** `text-align: center` removed from `#root`. `SummaryCard`'s `text-left` class remains (now semantically "left-align this card" rather than "override a global default"). Centering is now a visible, auditable decision in component JSX. Any future component with centred text will have `text-center` declared on it — discoverable without reading `index.css`.
+
+---
+
+### Item 8 — Orphaned `frontend/src/assets/hero.png`
+
+**Issue:** Step 15b deleted `App.css`, `react.svg`, and `vite.svg`. `hero.png` was left behind with zero importers anywhere in `frontend/src/`. The step 15b plan listed specific filenames to delete rather than running a reference sweep.
+
+**Resolution applied:** `hero.png` deleted via `git rm`. The Phase 9 cleanup step now includes a systematic sweep to catch any remaining unreferenced assets:
+
+```bash
+find frontend/src/assets -type f | while read f; do
+  name=$(basename "$f")
+  count=$(grep -r "$name" frontend/src --include="*.jsx" --include="*.js" -l | wc -l)
+  echo "$count $name"
+done
+```
+
+Files returning `0` are unreferenced. This replaces the name-based approach with a reference-based approach — more reliable as the project grows.
+
+**Step 15b note updated:** Documentation previously recorded `hero.png` as "kept". That entry has been corrected: `hero.png` was removed in the Phase 4 senior review pass.
+
+---
+
+### Item 9 — `SummaryCard` had no prop type contract
+
+**Issue:** `SummaryCard` accepted `value` as any type. Passing a number (e.g. `stats.patients`, which is `Set.size` — a `number`) would render silently. There was no signal to the caller that the contract required a `string`.
+
+**Why the naïve fix falls short:** Removing `String(stats.patients)` at the call site is correct (React renders `{0}` as `"0"` — no casting needed for render). But removing it without documenting the prop contract just moves the ambiguity back into the component.
+
+**Resolution applied:** JSDoc `@param {{ title: string, value: string }}` added to `SummaryCard`. Any IDE with JSDoc type checking now flags a numeric `value` at the call site. `String(stats.patients)` is kept in `Landing.jsx` as the explicit cast that satisfies the documented contract — the conversion is visible and intentional rather than implicit.
+
+---
+
+### Item 10 — Plan Step 21 used full-file replacement for an additive change
+
+**Issue:** The implementation plan for Step 21 (adding the CTA `Link`) provided the complete `Landing.jsx` as a code block under "Self-Contained Rule." An agent executing the plan would overwrite the entire file. If Step 20's output had any legitimate deviation from the plan — whitespace normalisation, a wording tweak, a corrected import — Step 21 would silently revert it with the stale version from the plan document.
+
+**Why the naïve fix falls short:** "Show only a diff" is ambiguous. A diff without context is hard for an agent to apply correctly to a file that may differ slightly from the plan.
+
+**Resolution applied:** Step 21 in `.claude/plans/phrase4.md` updated to specify two precise Edit operations with exact `old_string` / `new_string` pairs and a uniqueness verification command for each anchor:
+
+1. Insert `import { Link } from 'react-router-dom'` — anchor: the SummaryCard import line (verified unique before applying)
+2. Insert `<Link>` JSX block — anchor: `</div>` immediately before `</main>` (verified unique in scope)
+
+**Principle documented:** The "Self-Contained Rule" in the plan template is designed for steps that create new files or perform full rewrites. Additive steps should use Edit semantics — minimum change, verified-unique anchor, no full-file replacement.
 

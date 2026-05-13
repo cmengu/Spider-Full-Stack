@@ -1,3 +1,6 @@
+/**
+ * @param {{ title: string, value: string }} props
+ */
 export default function SummaryCard({ title, value }) {
   return (
     <div className="rounded-lg border border-gray-200 p-6 text-left">

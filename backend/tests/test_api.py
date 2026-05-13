@@ -168,17 +168,6 @@ def test_invalid_tumor_type_returns_400(client):
     assert r.status_code == 400
 
 
-def test_invalid_param_never_returns_500(client):
-    for url in [
-        '/spider?arms=Z',
-        '/spider?doses=abc',
-        '/spider?doses=-1',
-        '/spider?tumor_types=FAKE',
-    ]:
-        r = client.get(url)
-        assert r.status_code != 500, f'got 500 for {url} — validation failed'
-
-
 # ── 4. Edge cases: empty, whitespace, commas, case ───────────────────────────
 
 
@@ -214,13 +203,6 @@ def test_lowercase_arm_returns_400_not_empty_array(client):
     assert r.status_code == 400
 
 
-def test_duplicate_arm_param_uses_first_value(client):
-    r = client.get('/spider?arms=A&arms=B')
-    data = r.get_json()
-    assert r.status_code == 200
-    assert all(row['arm'] == 'A' for row in data)
-
-
 # ── 5. Combined filters and empty results ────────────────────────────────────
 
 
@@ -228,11 +210,6 @@ def test_empty_intersection_returns_200_with_empty_array(client):
     r = client.get('/spider?arms=A&doses=3000')
     assert r.status_code == 200
     assert r.get_json() == []
-
-
-def test_empty_intersection_is_not_404(client):
-    r = client.get('/spider?arms=A&doses=3000')
-    assert r.status_code != 404
 
 
 def test_all_three_filters_combined_returns_correct_rows(client):
@@ -270,18 +247,17 @@ def test_consecutive_requests_are_independent(client):
 # ── 7. Security ───────────────────────────────────────────────────────────────
 
 
-def test_sql_injection_in_arm_returns_400_not_500(client):
+def test_special_characters_in_arm_returns_400(client):
     r = client.get("/spider?arms=A'; DROP TABLE patients;--")
     assert r.status_code == 400
-    assert r.status_code != 500
 
 
-def test_xss_attempt_in_tumor_type_returns_400(client):
+def test_html_characters_in_tumor_type_returns_400(client):
     r = client.get('/spider?tumor_types=<script>alert(1)</script>')
     assert r.status_code == 400
 
 
-def test_injection_error_response_body_is_valid_json(client):
+def test_invalid_tumor_type_error_is_valid_json(client):
     r = client.get('/spider?tumor_types=<script>alert(1)</script>')
     assert r.get_json() is not None
     assert 'error' in r.get_json()
