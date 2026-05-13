@@ -252,3 +252,152 @@ Existing data tests still apply: **`cd backend && ./venv/bin/pytest -v`**.
 ### Git checkpoint (Step 9)
 
 Commit **`backend/app.py`** after the route matches the contract (Step 9 plan: do not batch with the next frontend milestone unless the roadmap says otherwise).
+
+---
+
+## Step 10: Manual curl verification
+
+**Goal:** Confirm the live Flask server behaves identically to what the unit tests assert — same filters, same status codes, same JSON shape — before moving to the frontend.
+
+### What was built
+
+No new files. Step 9's bash verification script covers this entirely. Step 10 is complete when Step 9's 8-check script passes.
+
+### Why this step exists at all
+
+Unit tests run the route **in-process** via Flask's test client. Manual curl hits the **real server over a real socket**. They should agree — but occasionally they don't. Flask's test client bypasses WSGI middleware, OS-level socket limits, and CORS headers. A 2-minute curl pass catches the class of bug that only shows up when a real HTTP connection is involved.
+
+### Decisions and rationale
+
+**`trap "kill $FLASK_PID 2>/dev/null" EXIT` immediately after backgrounding Flask**  
+Without a trap, any failing `assert` exits the script and leaves Flask running on port 5001. The next verification run then fails immediately with `OSError: address already in use`. The trap fires on **any** exit — success, failed assertion, Ctrl-C — so the port is always released.
+
+**Poll until ready instead of `sleep 2`**  
+```bash
+until curl -s http://localhost:5001/spider > /dev/null 2>&1; do sleep 0.3; done
+```
+A fixed `sleep 2` is fragile: slow machines or cold venv startups may not be ready in time. Polling exits the moment Flask responds — faster on fast machines, safe on slow ones.
+
+**Count assertions should compare filter correctness, not hardcoded numbers**  
+An earlier draft asserted `?tumor_types=HNSCC` returns 5 rows. The real data has 31 HNSCC rows across 5 patients. Hardcoding row counts ties the verification to a specific CSV snapshot. The safer pattern is: assert all returned rows have `tumor_type == 'HNSCC'` (correctness), plus optionally cross-check count against `load_data()` at runtime rather than a constant.
+
+### Milestone
+
+All 8 curl checks pass: full dataset (58 rows), column set (6 keys), `days` type (string), arm filter, tumor filter, invalid arm (400), invalid dose (400), empty intersection (200 with `[]`).
+
+---
+
+## Step 11: pytest tests for `GET /spider`
+
+**Goal:** Catch silent regressions in the route logic — validation, filtering, response shape, state isolation — without relying on a running server or the contents of the real CSV.
+
+### What was built
+
+- **`backend/tests/conftest.py`** — `sample_df` fixture (5 rows, 3 patients) and a `client` fixture that replaces the module-level `df` and all `VALID_*` sets with fixture-derived values for every test.
+- **`backend/tests/test_api.py`** — 28 tests across 7 groups: response contract, filter correctness, input validation, edge cases, combined filters, state isolation, security.
+
+### What the Flask test client actually does
+
+`client.get('/spider?arms=Z')` does **not** start a server or open a socket. It calls the Flask app **in-process**, passing a fake WSGI request object directly to the routing layer. The `spider()` function runs exactly as it would under a real HTTP request — `request.args`, validation, pandas filtering, `jsonify` — and returns a response object the test can inspect.
+
+This means every test is testing **`app.py` logic**: the split-strip-validate-filter-select pipeline. What varies is which branch of that pipeline each test exercises.
+
+### Why `sample_df` instead of the real CSV
+
+The real `df` has 58 rows. If `assert len(r.get_json()) == 32` breaks because a new patient was added to the CSV, the test suite has become a test of the *dataset*, not the *route logic*. `test_data.py` already covers data integrity against the real CSV; `test_api.py` should cover route behaviour.
+
+`sample_df` is 5 rows you define. The counts are facts you control — they never drift. When `?arms=A` asserts 3 rows, a broken filter returning 5 is immediately caught, not masked by a coincidentally correct count.
+
+**Why 5 rows, not 3:** With 3 rows a broken filter returning "all rows" and a working filter returning "correct rows" can produce the same count by coincidence. The 5-row fixture is structured so every filter has a unique expected count:
+
+| Filter | Expected rows | What it catches if wrong |
+|---|---|---|
+| `?arms=A` | 3 | Filter returning all 5 |
+| `?arms=B` | 2 | Filter returning all 5 |
+| `?tumor_types=HNSCC` | 2 | The original missing-filter-line bug |
+| `?arms=A&doses=3000` | 0 | AND logic failing |
+
+### Why the `client` fixture patches `VALID_*` too — not just `df`
+
+`VALID_ARMS`, `VALID_DOSES`, `VALID_TUMORS` are derived from `df` **at import time** — once, before any test runs. Patching only `df` leaves the validation sets pointing at the real CSV's values. The fixture data happens to use the same arms and doses as the real data, so tests pass — but for the wrong reason. If you needed a test row with `arm='C'` to verify validation rejects unknown values, the real `VALID_ARMS = {'A','B'}` would intercept it, not the fixture-derived one.
+
+Patching all four attributes makes the test hermetic: the route sees exactly the DataFrame and validation sets the fixture defines, nothing from the real CSV.
+
+### Why the simple approach (real CSV) is also valid for this take-home
+
+The more complex fixture setup is correct in principle. But for a fixed 58-row CSV that never changes during the project, testing against real data with known counts is also defensible — and simpler to explain in the presentation:
+
+> *"I tested against the real data with counts I verified during data inspection. The CSV is fixed for this take-home, so count assertions won't drift."*
+
+The fixture approach is worth knowing because it shows you understand **test isolation** and **what you're actually testing**. The real-data approach is worth knowing because it shows **pragmatism**. Be ready to argue either direction.
+
+### Decisions and rationale
+
+**`import app as app_module` at the top of conftest, not inside the fixture**  
+Module-level import makes the side effect (CSV load, startup prints) visible and explicit. Inside-fixture import hides it and implies the module is imported fresh per test — it isn't; Python caches module imports.
+
+**`sys.path.insert` not needed in conftest**  
+`pytest.ini` at `backend/pytest.ini` has `pythonpath = .`, which adds `backend/` to `sys.path` automatically. An explicit `sys.path.insert` in conftest is redundant and signals you don't know where the path is actually coming from.
+
+**Test the assumption violations, not just the happy path**  
+Every route has implicit assumptions. The tests are organised around violating those assumptions:
+
+| Assumption the code makes | Test that violates it |
+|---|---|
+| Arms are case-sensitive | `?arms=a` → expect 400, not empty array |
+| Dose tokens are parseable as int | `?doses=1800.5` → expect 400 |
+| Flask takes first value for duplicate params | `?arms=A&arms=B` → only Arm A rows returned |
+| Boolean indexing never mutates `df` | Check `len(app.df)` unchanged after a filtered request |
+| Injection strings fail validation, not pandas | SQL injection → 400, not 500 |
+
+**The one test that catches the original code's bug**  
+```python
+def test_tumor_type_filter_actually_filters(client):
+    r = client.get('/spider?tumor_types=HNSCC')
+    assert len(r.get_json()) == 2   # not 5 — proves filter ran
+```
+The original `app.py` draft validated `tumor_types` then forgot to apply the filter. This test fails immediately on the broken code and passes on the fix. A happy-path test that only checks `status_code == 200` would have missed it entirely.
+
+**State isolation tests**  
+```python
+def test_df_not_mutated_after_filtered_request(client, sample_df):
+    client.get('/spider?arms=A')
+    assert len(app_module.df) == len(sample_df)  # still 5
+
+def test_consecutive_requests_are_independent(client):
+    client.get('/spider?arms=A')
+    r2 = client.get('/spider')
+    assert len(r2.get_json()) == 5  # not 3
+```
+These tests verify that `filtered = df` (a reference, not a copy) never writes back to `df`. If someone changed `filtered = df` to `filtered = df.copy()` and then accidentally assigned `df = filtered` after filtering, these tests catch it.
+
+**Security tests return 400, not 500**  
+SQL injection and XSS strings are not in `VALID_ARMS` or `VALID_TUMORS`. They hit the validation layer and return 400 before the injection string ever reaches pandas. A 500 would mean the validation was bypassed — the injection reached a pandas operation that crashed on unexpected input, which is worse than a clean 400.
+
+### Folder structure after Step 11
+
+```
+backend/
+├── app.py
+├── data.py
+├── spiderplot.csv
+├── pytest.ini
+├── tests/
+│   ├── conftest.py       ← new
+│   ├── test_data.py      ← existing (unchanged)
+│   └── test_api.py       ← new
+└── venv/
+```
+
+### Verification
+
+```bash
+cd /Users/ngchenmeng/Interview-assignment
+backend/venv/bin/pytest backend/tests/ -v
+```
+
+All 32+ tests green (4 existing `test_data.py` + 28 new `test_api.py`).
+
+### Git checkpoint (Step 11)
+
+Commit **`backend/tests/conftest.py`** and **`backend/tests/test_api.py`** together after all tests pass.
