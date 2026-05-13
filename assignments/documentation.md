@@ -401,3 +401,32 @@ All 32+ tests green (4 existing `test_data.py` + 28 new `test_api.py`).
 ### Git checkpoint (Step 11)
 
 Commit **`backend/tests/conftest.py`** and **`backend/tests/test_api.py`** together after all tests pass.
+
+---
+
+## Phase 3: Frontend data pipeline (Steps 12–16)
+
+**Goal:** Centralize **`COLOR_MAP`** in **`frontend/src/constants.js`**, implement **`buildPatientSeries`** in **`frontend/src/utils/transformData.js`** (pure transform with O(n+m) day‑0 detection, **`colorKey`** on each patient), and lock behavior with **Vitest** (**13** tests) before Phase 5 chart work.
+
+### What was built
+
+| File | Role |
+|------|------|
+| **`frontend/vite.config.js`** | **`test.environment: 'jsdom'`** for Vitest; **`/api`** → Flask **5001** proxy (stale `// flag` comments removed). |
+| **`frontend/package.json`** | **`react-router-dom`**, **`react-plotly.js`**, **`plotly.js`**; dev:** **`vitest`**, **`@vitest/coverage-v8`**, **`jsdom`** (needed for **`jsdom`** test environment). **`"test": "vitest run"`**. |
+| **`frontend/src/constants.js`** | **`COLOR_MAP`** — arm+dose string → hex; single place for Phase 5/6. |
+| **`frontend/src/utils/transformData.js`** | **`buildPatientSeries(rows)`** — group by **`subject_id`**, inject **`{ weeks: 0, change: 0 }`** when no real day‑0 row, sort points and patients. |
+| **`frontend/src/utils/transformData.test.js`** | Contract + edge cases (string dose, day‑0 duplicate, sort orders, **`colorKey`** vs **`constants.js`**). |
+
+### Verification
+
+```bash
+cd frontend && npm test
+# or: npx vitest run
+```
+
+Expect **13** tests passed. **`App.jsx` / `main.jsx`** unchanged in Phase 3 per plan.
+
+### Git checkpoint (Phase 3)
+
+Separate commits per plan: Step 12 (deps + Vite), Step 13 (**`constants.js`**), Step 14 (**`transformData.js`**), Step 15 (**`transformData.test.js`**), Step 16 (this documentation block).
