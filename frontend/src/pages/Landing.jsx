@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import SummaryCard from '../components/SummaryCard.jsx'
 
 export default function Landing() {
@@ -46,6 +47,13 @@ export default function Landing() {
           value={loading ? '…' : stats.doses}
         />
       </div>
+
+      <Link
+        to="/visualisation"
+        className="inline-block rounded-md bg-gray-900 px-6 py-3 text-sm font-medium text-white hover:bg-gray-700"
+      >
+        Explore Spider Plot →
+      </Link>
     </main>
   )
 }
