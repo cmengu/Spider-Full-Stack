@@ -8,8 +8,11 @@ assignments/roadmap.md
 # Python
 backend/venv/
 backend/__pycache__/
+**/__pycache__/
 backend/*.pyc
+*.pyc
 backend/.env
+backend/.pytest_cache/
 
 # Node
 node_modules/

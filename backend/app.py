@@ -7,7 +7,7 @@ app = Flask(__name__)
 CORS(app, origins=[re.compile(r'http://localhost:\d+')])
 
 
-@app.route('/api/spider')
+@app.route('/spider')
 def spider():
     return jsonify([])
 
