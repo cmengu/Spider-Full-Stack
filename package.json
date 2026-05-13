@@ -1,0 +1,10 @@
+{
+  "name": "hummingbird-spider",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "concurrently \"backend/venv/bin/flask --app backend/app run --port 5001\" \"cd frontend && npm run dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

@@ -1,2 +1,21 @@
 assignment/
 .claude/
+
+# Private design notes — not part of the submission
+assignments/thinking-process.md
+assignments/roadmap.md
+
+# Python
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/.env
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# OS
+.DS_Store
