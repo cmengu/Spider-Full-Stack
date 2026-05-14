@@ -3,6 +3,10 @@ import re
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / '.env')
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
@@ -11,6 +15,9 @@ from flask_cors import CORS
 sys.path.insert(0, str(Path(__file__).parent))
 
 from data import load_data
+
+import anthropic
+from ai_filter import parse_filter_query
 
 app = Flask(__name__)
 CORS(app, origins=[re.compile(r'http://localhost:\d+')])
@@ -26,6 +33,10 @@ except Exception as e:
 VALID_ARMS = {str(a) for a in df['arm'].unique()}
 VALID_DOSES = {int(d) for d in df['dose'].unique()}
 VALID_TUMORS = {str(t) for t in df['tumor_type'].unique()}
+
+# Anthropic client: max_retries=1 so worst-case backend time (5s × 2) stays under
+# the frontend's AbortSignal.timeout(12000ms). Created once at startup.
+_anthropic_client = anthropic.Anthropic(max_retries=1)
 
 # Fixed response shape — tuple so accidental mutation cannot add columns silently
 RESPONSE_COLUMNS = ('subject_id', 'arm', 'days', 'change', 'dose', 'tumor_type')
@@ -82,6 +93,31 @@ def spider():
     result['change'] = result['change'].round(6)
 
     return jsonify(result.to_dict(orient='records'))
+
+
+@app.route('/ai-filter', methods=['POST'])
+def ai_filter():
+    body = request.get_json(silent=True)
+    if not body or 'query' not in body:
+        return jsonify({'error': 'Missing query'}), 400
+    query = body.get('query', '')
+    if not isinstance(query, str) or not query.strip():
+        return jsonify({'error': 'Query must be a non-empty string'}), 400
+    try:
+        filters = parse_filter_query(
+            query,
+            client=_anthropic_client,
+            valid_arms=VALID_ARMS,
+            valid_doses=VALID_DOSES,
+            valid_tumors=VALID_TUMORS,
+        )
+        return jsonify(filters)
+    except ValueError as exc:
+        # ValueError = client-caused problem (bad query, unsupported type, invalid LLM output)
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
+        # Unexpected failure — never leak internal details
+        return jsonify({'error': 'AI filter unavailable. Please try again.'}), 500
 
 
 if __name__ == '__main__':

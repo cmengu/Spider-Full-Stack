@@ -1,6 +1,12 @@
-import { useMemo, useState, useCallback } from 'react'
-import Plot from 'react-plotly.js'
+import { useMemo, useCallback, useRef } from 'react'
+import _createPlotlyComponent from 'react-plotly.js/factory'
+import Plotly from 'plotly.js-dist-min'
 import { COLOR_MAP } from '../constants'
+
+// .default fallback: Vite's CJS interop wraps the module differently depending
+// on whether the subpath was pre-bundled; this handles both shapes safely.
+const createPlotlyComponent = _createPlotlyComponent.default ?? _createPlotlyComponent
+const Plot = createPlotlyComponent(Plotly)
 
 const MODEBARBUTTONS_TO_REMOVE = ['select2d', 'lasso2d', 'autoScale2d']
 const CHART_MARGIN_RIGHT = 160
@@ -77,7 +83,7 @@ function makeTopAnnotation(x, text) {
  * @param {{ series: import('../utils/transformData').PatientSeries[], socMpfsWeeks: number }} props
  */
 export default function SpiderPlot({ series, socMpfsWeeks }) {
-  const [hoveredCurve, setHoveredCurve] = useState(null)
+  const graphDivRef = useRef(null)
 
   const traces = useMemo(() => {
     const seen = new Set()
@@ -104,14 +110,6 @@ export default function SpiderPlot({ series, socMpfsWeeks }) {
       }
     })
   }, [series])
-
-  const displayTraces = useMemo(
-    () =>
-      hoveredCurve === null
-        ? traces
-        : traces.map((t, i) => ({ ...t, opacity: i === hoveredCurve ? 1 : 0.2 })),
-    [traces, hoveredCurve],
-  )
 
   const seriesBounds = useMemo(() => {
     let maxWeeks = 0
@@ -166,21 +164,30 @@ export default function SpiderPlot({ series, socMpfsWeeks }) {
 
   const handleHover = useCallback(e => {
     const c = e.points?.[0]?.curveNumber
-    if (c != null) setHoveredCurve(c)
-  }, [])
+    if (c == null || !graphDivRef.current) return
+    const opacities = traces.map((_, i) => (i === c ? 1 : 0.2))
+    Plotly.restyle(graphDivRef.current, { opacity: opacities })
+  }, [traces])
+
+  const handleUnhover = useCallback(() => {
+    if (!graphDivRef.current) return
+    Plotly.restyle(graphDivRef.current, { opacity: Array(traces.length).fill(1) })
+  }, [traces])
 
   if (series.length === 0) return null
 
   return (
     <div className="h-[600px] w-full">
       <Plot
-        data={displayTraces}
+        data={traces}
         layout={layout}
         config={PLOT_CONFIG}
         useResizeHandler
         style={{ width: '100%', height: '100%' }}
+        onInitialized={(_, gd) => { graphDivRef.current = gd }}
+        onUpdate={(_, gd) => { graphDivRef.current = gd }}
         onHover={handleHover}
-        onUnhover={() => setHoveredCurve(null)}
+        onUnhover={handleUnhover}
       />
     </div>
   )

@@ -834,3 +834,648 @@ The assertion is retained — the CSV is fixed for this take-home and the snapsh
 
 **Filtering model (client-side vs server-side):** The roadmap stated client-side filtering; the API implements server-side filter params; Phase 6 will add client-side filtering on top. Decision: the frontend will always fetch all rows on mount and filter in memory. The dataset is bounded by clinical trial scale (sub-1000 rows) and a server round-trip on every filter change adds latency with no benefit at this data size. The API filter params are kept as documented in the spec and remain available for future consumers or pagination needs — the frontend simply does not use them. No code change required; this note closes the documentation gap.
 
+---
+
+## Phase 5: Visualisation Page — SpiderPlot, FilterPanel, Visualisation (Steps 22–24)
+
+**Goal:** Replace the `Visualisation.jsx` stub with a fully working clinical spider plot page. After this phase: `SpiderPlot.jsx` renders all patient lines with correct colours, reference lines, legend deduplication, and hover highlight; `FilterPanel.jsx` owns the three filter dropdowns, SoC mPFS input, and AI filter UI; `Visualisation.jsx` is the coordinator — owns all state, fetches from `/api/spider` on filter change, derives patient counts, and composes the layout.
+
+---
+
+### Architecture — four patterns and why
+
+#### Pattern 1: Coordinator (Visualisation owns all state)
+
+`Visualisation.jsx` is the single source of truth for every piece of filter state. `SpiderPlot` and `FilterPanel` are pure-presentational — they receive values and callbacks, they never fetch or store application state themselves.
+
+**Why this matters for maintainability:** If `SpiderPlot` fetched its own data, the "Showing X of Y patients" count could not be derived — it would require a separate fetch or a prop tunnel from a component that shouldn't own that concern. The AI filter and manual dropdowns would also need explicit synchronisation logic because they would live in different subtrees. With the coordinator pattern, AI filter writes to `setSelectedArm` / `setSelectedDose` / `setSelectedTumor` — the exact same setters the manual dropdowns use. Sync is automatic and zero-cost.
+
+**What breaks if violated:** Any component that fetches its own data creates two sources of truth. Every future feature that needs to know "what filters are currently active" must either prop-drill from the top or introduce a global store. The coordinator pattern keeps that boundary clean from day one.
+
+#### Pattern 2: Two-memo Plotly trace pattern (`traces` / `displayTraces`)
+
+```js
+const traces = useMemo(() => { ... }, [series])               // expensive — O(n) object construction
+const displayTraces = useMemo(() => { ... }, [traces, hoveredCurve]) // cheap — opacity overlay only
+```
+
+The expensive step — building all Plotly trace objects including x/y arrays, customdata, and hovertemplate — runs only when `series` changes (i.e. when the data itself changes). The cheap step — applying opacity — runs on every hover event.
+
+**Why this matters for scalability:** If opacity were included in the `traces` memo, every `onHover` event would rebuild all N trace objects. At 10 patients this is imperceptible. At 300 patients with 30 time points each, rebuilding 9,000 data-point mappings on every cursor movement would cause visible frame drops. Decoupling the two responsibilities is the correct architecture regardless of current dataset size — it does not become a footgun as the data grows.
+
+**Why this matters for maintainability:** The two memos have different reasons to change. `traces` changes when the data transform logic changes. `displayTraces` changes when the hover interaction model changes. Keeping them separate means a change to one does not risk breaking the other.
+
+#### Pattern 3: Two-state SoC input (`inputValue` string / `socMpfsWeeks` number)
+
+`FilterPanel` holds `inputValue` (a string, updated on every keystroke). `Visualisation` holds `socMpfsWeeks` (a number, updated only on valid blur-commit). The chart only ever reads `socMpfsWeeks`.
+
+**Why this matters for maintainability:** This encodes a boundary between display state and application state at the type level. `inputValue` can be `""`, `"-"`, `"10."`, or `"abc"` — all valid intermediate typing states that cannot be represented as a `number`. Using a single numeric state forces validation on every keystroke, which either snaps the field (bad UX) or propagates invalid values to the chart (data integrity violation). The two-state pattern is the only design that satisfies both constraints.
+
+**Why this matters for conciseness:** `commitSocInput` is the single translation point between the two states. All validation logic lives in one function. There is no validation in `onChange`, no validation in `Visualisation`'s setter, no validation in `SpiderPlot`. One function, one place to change if the rules change.
+
+**The sync-back mechanism:** A `useEffect` in `FilterPanel` watches `socMpfsWeeks` and resets `inputValue` to `String(socMpfsWeeks)` when it changes. This handles the Reset All case — `Visualisation` resets `socMpfsWeeks` to `DEFAULT_SOC`, and `FilterPanel`'s effect fires to update the display string. Without this, the input field would retain stale user-typed text after a reset.
+
+#### Pattern 4: AbortController per fetch effect
+
+Every `useEffect` that calls `fetch` creates an `AbortController`, passes its signal to `fetch`, and returns `() => controller.abort()` as the cleanup function.
+
+**Why this matters for correctness:** React's `useEffect` cleanup fires before the next effect run. When a user changes a filter quickly — arm A, then arm B, then arm A again — three fetches fire in rapid succession. Without abort, the slowest response wins and can overwrite a more recent result. With abort, each cleanup cancels the previous in-flight request before the new one starts. The chart always reflects the most recent filter selection.
+
+**Why this matters for scalability:** At low latency (localhost) race conditions are unlikely. Against a real API with variable response times, they are inevitable. Wiring AbortController from the start means this class of bug cannot enter the codebase later.
+
+---
+
+### Step 22: `SpiderPlot.jsx`
+
+**Single responsibility:** Receive `series` (pre-built `PatientSeries[]`) and `socMpfsWeeks`, build Plotly traces, render chart.
+
+#### Decision: receive `series`, not raw `rows`
+
+`Visualisation` already calls `buildPatientSeries(rows)` to get `series.length` for the patient count display. If `SpiderPlot` received raw rows and called `buildPatientSeries` internally, the same O(n) transform would run twice on every filter change — once for the count, once for the chart. Passing `series` makes the data flow unidirectional and eliminates the redundant computation.
+
+**Maintainability impact:** A future change to `buildPatientSeries` (new field, different sort) only needs to be verified in one place. The chart cannot diverge from the count display because they read the same object.
+
+#### Decision: `seriesBounds` memo split from `layout` memo
+
+The original single `layout` memo depended on `[series, socMpfsWeeks]`. The axis range computation (scanning all data points for min/max values) does not use `socMpfsWeeks` at all — it was in the dependency array by accident.
+
+```js
+// Before: full data scan on every SoC input blur
+const layout = useMemo(() => { ... }, [series, socMpfsWeeks])
+
+// After: data scan only when data changes
+const seriesBounds = useMemo(() => { ... }, [series])
+const layout       = useMemo(() => { ... }, [seriesBounds, socMpfsWeeks])
+```
+
+**Scalability impact:** The SoC input is a frequently changed value — users adjust it to compare survival benchmarks. Every blur commit previously triggered an O(n) scan across all patient time points. After the split, SoC changes only recompute the cheap layout object (shapes, annotations, axis config). The data scan runs only when the actual patient data changes.
+
+**Maintainability impact:** Dependency arrays are a documentation of what a memo depends on. An incorrect dependency array is a silent lie that future developers will read and trust. `[seriesBounds, socMpfsWeeks]` is accurate; `[series, socMpfsWeeks]` was not.
+
+#### Decision: module-level constants for clinical thresholds
+
+```js
+const PD_THRESHOLD  = 20    // RECIST progression threshold (% increase)
+const PR_THRESHOLD  = -30   // RECIST partial-response threshold (% decrease)
+const TICK_INTERVAL = 6     // x-axis tick cadence in weeks
+```
+
+These values have domain meaning. `20` and `-30` are RECIST criteria — thresholds defined by oncology protocol, not arbitrary chart formatting numbers. A clinician or product manager asking "can we adjust the partial response threshold to -25%?" should require a one-line edit to a named constant, not a grep through a Plotly layout function.
+
+**Maintainability impact:** Named constants make the why visible. `PR_THRESHOLD = -30` tells a reader this is a domain value, not a layout magic number. `makeHLine(-30, 'dash')` tells a reader nothing without comments.
+
+#### Decision: `HOVER_TEMPLATE` and `PLOT_CONFIG` hoisted to module level
+
+Both are static — they do not depend on any props or state. Defining them inside the component means they are re-evaluated on every render (for `PLOT_CONFIG`) or every `series` change (for `HOVER_TEMPLATE` inside the memo).
+
+**Scalability impact:** `PLOT_CONFIG` is a new object reference on every render. React-Plotly compares props by reference; a new `config` object on every render may trigger spurious Plotly internal reconciliation. Hoisting it to module level makes the reference stable.
+
+**Conciseness impact:** Inline object literals in JSX are noise. `config={PLOT_CONFIG}` is immediately readable; `config={{ displaylogo: false, modeBarButtonsToRemove: [...] }}` forces the reader to parse an inline definition mid-JSX.
+
+#### Decision: `makeTopAnnotation` helper for SoC label
+
+`makeRightAnnotation` was used for the PD and PR labels. The SoC label above the vertical line was hand-rolled inline with a full object literal. Two annotation styles, no shared factory.
+
+**Maintainability impact:** If the font size or colour for chart annotations needs to change, it now changes in one helper per annotation type rather than one helper plus one inline object. Consistency in the factory pattern makes the `annotations` array scannable — each line is one function call, not a mix of function calls and object literals.
+
+#### Decision: `customdata` uses a single `meta` array per patient
+
+```js
+// Before: creates one new array per data point
+customdata: patient.points.map(() => [subject_id, arm, dose, tumor_type])
+
+// After: all points share one array object
+const meta = [patient.subject_id, patient.arm, patient.dose, patient.tumor_type]
+customdata: patient.points.map(() => meta)
+```
+
+Patient metadata is constant across all of a patient's time points. The previous implementation allocated N identical 4-element arrays for a patient with N measurements. A patient with 30 visits produced 30 heap allocations of the same 4 values.
+
+**Scalability impact:** Memory allocation is cheap in isolation but compounds. At 300 patients × 30 visits each, the old approach allocated 9,000 arrays on every series change. The new approach allocates 300 arrays total.
+
+#### Decision: `handleHover` extracted as `useCallback`
+
+```js
+const handleHover = useCallback(e => {
+  const c = e.points?.[0]?.curveNumber
+  if (c != null) setHoveredCurve(c)
+}, [])
+```
+
+**Maintainability impact:** Named functions are visible in the React DevTools component profiler. An inline arrow in JSX shows as an anonymous function. When profiling hover performance, `handleHover` identifies the handler immediately; `e => { ... }` does not.
+
+**Conciseness impact:** Multi-statement inline arrows in JSX are a readability smell. The JSX layer should describe structure, not contain logic. Extracting the handler makes the `<Plot>` props scannable without parsing imperative code.
+
+#### Known ceiling: `displayTraces` hover copies
+
+`displayTraces` creates a shallow copy of all N trace objects on every hover event via `traces.map((t, i) => ({ ...t, opacity: ... }))`. At 10 patients this is imperceptible. At 300+ patients moving the cursor across the chart creates continuous frame-by-frame array allocations.
+
+The correct fix is Plotly's imperative `restyle()` API, which updates a single property on existing traces without rebuilding the data array. This requires restructuring `SpiderPlot` from declarative React props to an imperative Plotly instance — a meaningful change outside this phase's scope. Documented as known tech debt; upgrade path is `Plotly.restyle(plotRef.current.el, { opacity }, indices)`.
+
+---
+
+### Step 23: `FilterPanel.jsx`
+
+**Single responsibility:** Receive filter values and callbacks, render dropdowns, SoC input, and AI filter UI. Hold only display state — `aiQuery` and `inputValue`.
+
+#### Decision: two-state SoC input (display string + committed number)
+
+See Architecture Pattern 3 above. The key implementation detail: `Number()` is used instead of `parseFloat()` for the parse step.
+
+```js
+const parsed = Number(inputValue.trim())
+```
+
+`parseFloat("10.5abc")` returns `10.5` — it silently accepts and truncates garbage input. `Number("10.5abc")` returns `NaN` — it rejects it entirely. The validation intent is "this must be a complete, clean number" not "give me whatever leading digits you can find." `Number()` enforces that intent.
+
+**Maintainability impact:** The validation rule is explicit and testable in isolation. Any future change to validation bounds (`parsed < 0`, `parsed > maxWeeks`) is a one-line edit in `commitSocInput`. There is no validation scattered across the component.
+
+#### Decision: `maxWeeks` passed as prop, not validated in Visualisation's setter
+
+The upper bound for the SoC input (`parsed > maxWeeks`) lives in `FilterPanel`. The alternative is to validate in `Visualisation`'s `setSocMpfsWeeks` setter or in a custom setter wrapper.
+
+**Maintainability impact:** Validation lives where the user sees the input and where the error is visible. If validation lived in Visualisation, an invalid value would need to propagate up through `onSocMpfsChange`, get rejected, and somehow communicate the rejection back down to FilterPanel for display. The prop-based approach keeps the control flow local: input → `commitSocInput` → revert display or call `onSocMpfsChange`. No round-trip required.
+
+#### Decision: `Select` helper component for dropdown repetition
+
+Three identical `<select>` structures — same class string, same pattern — are extracted into a `Select(label, value, options, onChange)` helper defined at the bottom of the file. Three call sites replace three repetitions of 8 lines each.
+
+**Conciseness impact:** The three `<Select>` lines in the JSX are scannable in seconds. The three raw `<select>` blocks would require reading ~24 lines of identical markup to confirm they are structurally the same. Any change to the dropdown style (focus ring, border colour) now requires one edit.
+
+**Maintainability impact:** The `Select` helper is file-private (not exported). It solves a local repetition problem without creating a shared component that other files might depend on. The boundary is explicit.
+
+#### Decision: `aiQuery` stays in FilterPanel, not lifted to Visualisation
+
+`aiQuery` is what the user is typing in the AI textarea. Visualisation does not need to know about mid-type state — it only needs the query when the user clicks Filter. Lifting `aiQuery` to Visualisation would cause the entire page (including the chart) to re-render on every keystroke.
+
+**Scalability impact:** Keeping display state local to the component that owns the display is the correct boundary. Every keystroke in the AI textarea re-renders only `FilterPanel`. With `aiQuery` in Visualisation, it would re-render `FilterPanel`, `SpiderPlot`, the patient count display, and any other children of the coordinator.
+
+---
+
+### Step 24: `Visualisation.jsx`
+
+**Single responsibility:** Own all filter state, fetch on filter change, derive patient counts, compose layout.
+
+#### Decision: `buildParams` as a pure function outside the component
+
+```js
+function buildParams(arm, dose, tumor) {
+  const p = new URLSearchParams()
+  if (arm   !== 'all') p.set('arms',        arm)
+  if (dose  !== 'all') p.set('doses',       dose)
+  if (tumor !== 'all') p.set('tumor_types', tumor)
+  const s = p.toString()
+  return s ? `?${s}` : ''
+}
+```
+
+The critical invariant this function enforces: `'all'` is never sent as a query parameter value. The backend does not understand `?arms=all` — it validates arms against known values and would return 400.
+
+**Maintainability impact:** A pure function is testable in isolation. The query-building logic can be verified with five input/output pairs without mounting a React component, mocking fetch, or setting up a test client. Any future addition (e.g. a new filter dimension) is a one-line addition to `buildParams` with a corresponding test.
+
+**Conciseness impact:** If this logic lived inside the `useEffect`, it would be mixed with fetch setup, controller creation, state updates, and error handling. Extracting it makes the effect's job clear: "call `buildParams`, call `fetch`, handle the response."
+
+#### Decision: `hasCapturedTotal` as a `useRef`, not `useState`
+
+```js
+const hasCapturedTotal = useRef(false)
+// ...
+if (!hasCapturedTotal.current) {
+  setTotalPatients(buildPatientSeries(data).length)
+  hasCapturedTotal.current = true
+}
+```
+
+`hasCapturedTotal` is a one-way latch. Once `true`, it never goes back. It does not drive any rendering decision — it is internal bookkeeping for the effect. Using `useState` would cause an extra re-render the moment the total is captured (the state update would trigger a render cycle with no visible change). `useRef` mutates without triggering re-renders.
+
+**Maintainability impact:** The semantics of `ref` vs `state` communicate intent. `useRef` signals "this is side-effect bookkeeping." `useState` signals "this drives rendering." Using the wrong one misleads future readers about why a re-render occurs.
+
+**The total patient count problem explained:** The `"Showing X of Y"` counter needs a stable total. After the first unfiltered fetch, all subsequent fetches are filtered — the total is no longer recoverable from the response. The latch captures it once from the first response and freezes it for the page lifetime. No second parallel fetch is needed; the initial mount state (`all` defaults) guarantees the first response is the full dataset.
+
+#### Decision: AI filter writes to the same state setters as manual dropdowns
+
+```js
+setSelectedArm(json.arm   === 'all' ? 'all' : String(json.arm))
+setSelectedDose(json.dose  === 'all' ? 'all' : String(json.dose))
+setSelectedTumor(json.tumor_type === 'all' ? 'all' : json.tumor_type)
+```
+
+The AI filter response sets the same three state variables as the manual dropdowns. The dropdowns then reflect the AI-applied values immediately — no extra sync logic, no shadow state.
+
+**Maintainability impact:** Any future feature that reads `selectedArm` (a new chart layer, a URL param sync, an export function) automatically reflects both manual and AI filter changes without modification. The state is one thing; how it got set is irrelevant to consumers.
+
+**The `String()` coercion:** The API might return `dose` as a number (`1800`) while the dropdown compares string values (`'1800'`). `String(json.dose)` normalises the type at the entry point so the dropdown's `value={selectedDose}` comparison is always string-to-string. Without this, the dropdown would show the correct label visually but the `value` prop would not match any `<option>`, causing a silent mismatch.
+
+#### Decision: `maxWeeks || Infinity` default during loading
+
+```js
+const maxWeeks = useMemo(
+  () => series.length === 0 ? Infinity : series.reduce(...),
+  [series],
+)
+```
+
+On first mount, `series` is empty before the fetch completes. `FilterPanel`'s SoC input validation checks `parsed > maxWeeks`. If `maxWeeks` were `0` during loading, any positive input would fail validation and revert — the user could not type a value before data loaded. `Infinity` makes every positive value valid during the loading window, then resolves to the actual data maximum once the fetch completes.
+
+**Maintainability impact:** The guard lives in the `maxWeeks` derivation, not in `commitSocInput`. `FilterPanel` does not need to know about the loading state — it just receives a `maxWeeks` prop. The coordinator absorbs the edge case; the child component is simpler.
+
+---
+
+### Senior Review Fixes applied to Phase 5 code
+
+Seven issues caught and fixed before implementation. Full rationale for each is in the Architecture section above; this table is the quick-reference record.
+
+| # | Issue | Fix | Impact |
+|---|---|---|---|
+| 1 | `20`, `-30`, `6` as magic numbers in layout | `PD_THRESHOLD`, `PR_THRESHOLD`, `TICK_INTERVAL` constants | Maintainability — threshold changes are 1-line edits |
+| 2 | `HOVER_TEMPLATE` and `PLOT_CONFIG` inline in component | Hoisted to module level | Conciseness + scalability — stable references, no per-render allocation |
+| 3 | `layout` memo depended on `[series, socMpfsWeeks]` | Split into `seriesBounds` (depends on `[series]`) + `layout` (depends on `[seriesBounds, socMpfsWeeks]`) | Scalability — O(n) data scan no longer runs on every SoC change |
+| 4 | `customdata` allocated N identical arrays per patient | Single `meta` array per patient, N references to it | Scalability — eliminates N×4 heap allocations on every series update |
+| 5 | Comment claimed early return guards the memos above it | Comment removed | Maintainability — React hooks run unconditionally before early returns; the comment was wrong |
+| 6 | SoC annotation hand-rolled inline; PD/PR used helpers | `makeTopAnnotation(x, text)` helper added | Maintainability — one factory pattern for all annotations |
+| 7 | Multi-statement `onHover` inline arrow in JSX | `handleHover = useCallback(fn, [])` extracted | Maintainability + conciseness — named, stable, visible in DevTools |
+
+### Known tech debt
+
+| Item | Location | Upgrade path |
+|---|---|---|
+| `displayTraces` O(n) shallow copy on every hover | `SpiderPlot.jsx` | `Plotly.restyle()` imperative API for opacity updates |
+| No unit test for `SpiderPlot` | — | Add Playwright test when E2E suite is introduced |
+| AI filter error shown as inline text | `FilterPanel.jsx` | Replace with toast in a design-system phase |
+
+---
+
+## Bug log: plotly.js v3 + Vite integration (Phase 5 runtime)
+
+Three consecutive browser errors appeared on first load of `/visualisation` after Phase 5 was implemented. Each was a different symptom of the same underlying problem: **`plotly.js` (the raw source package) was not designed to be consumed directly by Vite's ESM bundler.** The errors had to be resolved in sequence because each fix exposed the next layer of the same root cause.
+
+All three errors required a **hard restart** (`rm -rf frontend/.vite && npm run dev`) to take effect. Hot Module Replacement only watches `src/` — it never re-runs Vite's dependency pre-bundler. Any change to `vite.config.js`, `package.json`, or which packages are in `optimizeDeps` only takes effect when the dev server restarts cold and esbuild re-processes the dependency cache in `frontend/.vite/deps/`.
+
+---
+
+### Error 1 — `Element type is invalid: expected a string or class/function but got: object`
+
+**Where:** `SpiderPlot.jsx` render, `<Plot>` component.
+
+**Cause:** `react-plotly.js`'s main bundle hardwires `require("plotly.js/dist/plotly")` internally — it reaches directly into Plotly's dist folder rather than going through the package root. In `plotly.js@3.x`, the export shape of `dist/plotly.js` changed. Vite's CJS interop wrapper received a module namespace object instead of the Plotly constructor and passed it through as-is. React tried to render that object as a component and threw.
+
+**What not to do:** Downgrade `plotly.js` to `^2.35.2`. This makes the error go away but trades away v3's improvements (performance, active maintenance, new trace types) to paper over a wiring problem. The dependency version is not the bug.
+
+**Fix applied:** The factory pattern — `react-plotly.js`'s documented escape hatch for exactly this situation:
+
+```js
+// Before
+import Plot from 'react-plotly.js'
+
+// After
+import _createPlotlyComponent from 'react-plotly.js/factory'
+import Plotly from 'plotly.js-dist-min'
+const createPlotlyComponent = _createPlotlyComponent.default ?? _createPlotlyComponent
+const Plot = createPlotlyComponent(Plotly)
+```
+
+`react-plotly.js/factory` exports `createPlotlyComponent(Plotly)` — you supply the Plotly instance yourself, bypassing the hardwired internal import entirely. The React component wrapper is built around your Plotly, not the one `react-plotly.js` would have fetched internally.
+
+---
+
+### Error 2 — `ReferenceError: global is not defined`
+
+**Where:** Deep inside `plotly__js.js` (Vite's processed bundle of `plotly.js`).
+
+**Cause:** `plotly.js` (the source package) was written for webpack/Node environments where `global` is a known runtime identifier. Vite is ESM-first and does not polyfill Node.js globals — `global` simply does not exist in the browser. Webpack shimmed this automatically for years, so many CJS libraries grew an implicit dependency on it.
+
+**Intermediate fix considered:** `define: { global: 'globalThis' }` in `vite.config.js` — a compile-time text substitution that rewrites every `global` reference to `globalThis` before the browser sees it. This would have worked, but it revealed the next error immediately, which indicated a deeper problem with using `plotly.js` source directly in Vite.
+
+**Root fix:** Switch from `plotly.js` to `plotly.js-dist-min`. See Error 3.
+
+---
+
+### Error 3 — `TypeError: Cannot read properties of undefined (reading 'prototype')`
+
+**Where:** Deep inside `plotly__js.js`, multiple frames.
+
+**Cause:** `plotly.js` (the source package) is a large CJS module with complex circular dependencies between its internal files. When Vite processes it through its own ESM transform pipeline, some of those circular dependencies resolve to `undefined` at module evaluation time — before the actual exports are populated. Accessing `.prototype` on `undefined` throws. This is not a Plotly bug or a Vite bug in isolation; it is a fundamental incompatibility between CJS circular-dependency patterns and ESM's static evaluation order.
+
+**Fix applied:** Replace `plotly.js` with `plotly.js-dist-min` and add both packages to `optimizeDeps.include`:
+
+```bash
+npm install plotly.js-dist-min
+```
+
+```js
+// vite.config.js
+optimizeDeps: {
+  include: ['react-plotly.js/factory', 'plotly.js-dist-min'],
+},
+```
+
+**Why `plotly.js-dist-min` solves all three errors:**
+
+Plotly ships three packages for different use cases:
+
+| Package | What it is | Use case |
+|---|---|---|
+| `plotly.js` | Raw source, all traces | webpack / custom build pipelines |
+| `plotly.js-dist` | Pre-built browser bundle, full | Vite / CDN / direct browser use |
+| `plotly.js-dist-min` | Same, minified (~3.2 MB) | Same, production-optimised |
+
+`plotly.js-dist-min` is already a finished browser bundle — esbuild has already run on it, all circular dependencies are resolved, `global` references are already handled, and the export is a clean Plotly object. Vite does not need to transform it, so none of the CJS→ESM conversion issues apply.
+
+`optimizeDeps.include` forces Vite's pre-bundler to process both packages through esbuild at startup, which handles CJS interop (including the `__esModule` flag on `react-plotly.js/factory`) correctly and stably.
+
+---
+
+### Final import shape in `SpiderPlot.jsx`
+
+```js
+import _createPlotlyComponent from 'react-plotly.js/factory'
+import Plotly from 'plotly.js-dist-min'
+
+// .default fallback: Vite's CJS interop wraps the module differently depending
+// on whether the subpath was pre-bundled; this handles both shapes safely.
+const createPlotlyComponent = _createPlotlyComponent.default ?? _createPlotlyComponent
+const Plot = createPlotlyComponent(Plotly)
+```
+
+### Final `vite.config.js` addition
+
+```js
+optimizeDeps: {
+  include: ['react-plotly.js/factory', 'plotly.js-dist-min'],
+},
+```
+
+### Why all three errors required a hard restart
+
+Vite's dependency pre-bundler (`esbuild`) runs once at dev server startup and caches results in `frontend/.vite/deps/`. The browser loads from that cache, not from `node_modules`. HMR only watches `src/` — it never re-runs the pre-bundler. Any change to `vite.config.js`, installed packages, or `optimizeDeps` is invisible to a running server.
+
+```bash
+rm -rf frontend/.vite && npm run dev
+```
+
+Deleting `.vite/` forces a clean pre-bundle on next startup. Without this, Vite may detect no config change and serve the stale broken cache.
+
+---
+
+## Phase 7: AI Filter — `ai_filter.py`, `POST /ai-filter`, frontend fixes
+
+**Goal:** Translate natural language queries ("Show only HNSCC patients in Arm B") into validated filter state that updates the dropdowns and chart. The frontend UI was already built in Phase 5 — this phase adds the backend that it was waiting for, plus two frontend bugfixes.
+
+---
+
+### The central design question: LLM or rule-based parser?
+
+The honest senior dev answer is: **for this specific domain, a rule-based parser is objectively the correct engineering choice.**
+
+The filter space is fully enumerable — 2 arms, 2 doses, 3 tumor types, 7 known values total. A regex parser covering all natural language variants is ~25 lines of Python:
+
+```python
+ARM_PATTERN   = re.compile(r'\barm\s+([AB])\b', re.IGNORECASE)
+DOSE_PATTERN  = re.compile(r'\b(1800|3000)\s*mg\b', re.IGNORECASE)
+TUMOR_PATTERN = re.compile(r'\b(sqNSCLC|nsNSCLC|HNSCC)\b', re.IGNORECASE)
+```
+
+This is zero latency, zero API cost, zero network dependency, fully deterministic, and trivially testable with no mocking required. The LLM version adds 1–3 seconds of latency, API cost, non-determinism, and all the complexity described in this section — for no functional gain on queries within this domain.
+
+**Why LLM is used anyway — two justifications:**
+
+1. **The assignment is explicitly testing AI integration capability.** Choosing rule-based is technically correct but misses the point of the exercise. The evaluation criteria are: clean interface design, validation before applying, error handling, and architectural decisions. A rule-based parser demonstrates none of those in an interesting way.
+
+2. **The query space escapes enumeration at the boundary.** The assignment spec lists "Hide patients with tumor shrinkage greater than 30%" as a target query. That query cannot be expressed by the current 3-filter schema at all — rule-based or LLM. An LLM with the `unsupported: true` flag at least fails gracefully with a clear error. A rule-based parser would silently return all-all-all.
+
+**The most important design insight:** The architecture does not bet the codebase on the LLM choice. The entire AI module is swappable — `parse_filter_query` accepts a `client` as a dependency injection parameter, and `validate_filters` is a pure deterministic function that runs regardless of how the dict was produced. Replace the LLM with a regex parser and nothing else changes.
+
+---
+
+### The mental model: LLM as structured extractor, not decision-maker
+
+This is the clearest way to understand the architecture:
+
+```
+Natural language (unstructured, infinite input space)
+        ↓
+   LLM (parse_filter_query)    ← the only thing the LLM does
+        ↓
+JSON dict (structured, finite output space)
+        ↓
+Rule-based Python (validate_filters)   ← deterministic, no LLM
+        ↓
+Trusted filter state
+```
+
+**`validate_filters` is not an LLM call.** It is a pure deterministic Python function. It receives a plain dict and runs deterministic rules — strip whitespace, coerce dose type, check set membership, reject anything outside known values. No network call, no randomness, no Anthropic dependency. The LLM's output is treated exactly like user input off a form: untrusted until it passes validation.
+
+The LLM's only job is **structured extraction** — convert free text into a known schema so the rule-based code does not have to handle every possible phrasing. "Show me the 1800mg cohort", "patients on lower dose", "1800 mg arm" all route to the same `{"dose": "1800"}` dict. The rule-based layer then validates that dict with the same determinism it would apply to a manually typed HTTP parameter.
+
+---
+
+### Architecture — four functions, one responsibility each
+
+#### `build_system_prompt(valid_arms, valid_doses, valid_tumors) → str`
+
+Generates the LLM instruction from the live valid sets. Not a hardcoded string.
+
+**Why dynamic, not hardcoded:**
+The roadmap's original draft hardcoded `"arm": "A"|"B"|"all"` in the prompt string. This creates three separate sources of truth that can drift independently:
+1. `app.py` derives `VALID_ARMS/DOSES/TUMORS` from the DataFrame at startup
+2. `ai_filter.py` would hardcode those same values as a static string
+3. The system prompt would describe values the validator might reject
+
+If the CSV gains a new tumor type, `app.py` auto-adapts. A hardcoded prompt still lists only the original three types — the model returns the new type, the validator rejects it, the user gets a 400 with no useful message.
+
+**Why tested like code:** The system prompt is the most fragile part of the system. One removed sentence — the `"unsupported": true` instruction — silently breaks the unsupported-query detection mechanism. All other tests continue to pass. Because prompts are code, they must be tested like code: `test_system_prompt_contains_unsupported_instruction` asserts the key instruction is present; `test_system_prompt_injects_valid_values_not_hardcoded` asserts that passing `{'X', 'Y'}` produces `"X"` in the prompt and not `"A"`.
+
+**Maintainability:** One function to update when the filter schema grows. The LLM's awareness of valid values is always in sync with the validator's awareness because they are derived from the same sets passed as arguments.
+
+#### `parse_llm_response(raw: str) → dict`
+
+Parses raw LLM text to a dict. Catches `json.JSONDecodeError` and re-raises as `ValueError`.
+
+**Why this function exists as a standalone:**
+`json.JSONDecodeError` is not a `ValueError`. The `/ai-filter` route catches `ValueError → 400` and `Exception → 500`. If `json.loads` throws `JSONDecodeError` without being caught and re-raised, the endpoint returns a 500 for what is actually a recoverable condition — the model returned prose instead of JSON. That is a 400 (bad LLM output, caused by the user's query) not a 500 (unexpected server failure).
+
+Extracting this function makes the exception contract explicit and testable: `test_parse_llm_response_non_json_raises_valueerror_not_jsondecodeerror` asserts the specific exception type. Without this test, a refactor that catches `Exception` directly in the endpoint could silently swallow the wrong exception type and return the wrong status code.
+
+**Conciseness:** Four lines. Its only job is the type boundary between raw text and structured data.
+
+#### `validate_filters(parsed, valid_arms, valid_doses, valid_tumors) → dict`
+
+Normalizes and validates a parsed dict. Pure Python, zero Anthropic dependency.
+
+**Why normalization before validation:**
+The HTTP layer in `app.py` is strict — `?arms=a` returns 400, because user-controlled parameters must have predictable contracts. The AI layer should be lenient — if the model returns `" A "` (whitespace) or `"a"` (lowercase), the intent is unambiguous. Rejecting it as invalid is the wrong call at this boundary.
+
+```python
+# Before validation: normalize
+arm   = str(parsed['arm']).strip()
+dose  = str(int(str(dose_raw).strip()))  # handles int 1800 or string "1800"
+tumor = str(parsed['tumor_type']).strip()
+```
+
+The existing `test_api.py` tests `test_lowercase_arm_returns_400` — strict validation on HTTP parameters is correct for adversarial input. The AI layer tests `test_validate_filters_strips_whitespace_from_arm_and_tumor` — lenient normalization is correct for a model trying to help. Same concept, opposite policy, both correct for their context.
+
+**Why standalone:**
+The 11 validation cases — missing key, whitespace, int dose, unsupported flag, all-all-all, invalid arm, invalid dose, invalid tumor, non-numeric dose, dose string coercion, dose int coercion — are all testable with plain dict inputs and no Anthropic import. If validation were inside `parse_filter_query`, testing any of these would require setting up a mock LLM client. Extracting it means the test reads:
+
+```python
+result = validate_filters({'arm': ' A ', 'dose': 1800, ...}, VALID_ARMS, ...)
+assert result['arm'] == 'A'
+assert result['dose'] == '1800'
+```
+
+No mock, no network, no setup.
+
+**Why `int(dose) not in valid_doses` with try/except:**
+The roadmap's draft did `int(dose)` with no error handling. If the model returns `"1800mg"` or `null`, `int()` throws `TypeError` — not caught by the `except ValueError` in the endpoint, falls through to `except Exception`, returns 500. Wrapping in `try/except (ValueError, TypeError)` ensures non-numeric dose always produces a user-facing 400.
+
+**The all-all-all case:**
+If the model returns `{"arm": "all", "dose": "all", "tumor_type": "all"}` without the `unsupported` flag, it is ambiguous — "show all patients" and "I could not parse your query" produce identical output. The validator rejects this with a hint to use Reset All, which already handles the legitimate "show all" use case. The `unsupported: true` flag is the unambiguous signal for out-of-scope queries.
+
+**Dose always returned as string:**
+FilterPanel's `<select>` elements use string `value` attributes — `"1800"`, `"3000"`, `"all"`. The `validate_filters` function always returns dose as a string. This makes the type contract across the entire pipeline predictable: API rows have `dose` as int, filter state has `dose` as string, `parseInt(filters.dose)` is the one explicit conversion. Without this, `json.dose` could be `1800` (int) or `"1800"` (string) depending on the model's mood, and the `parseInt` conversion in `Visualisation.jsx` would hide intermittent mismatches.
+
+#### `parse_filter_query(query, *, client, valid_arms, valid_doses, valid_tumors) → dict`
+
+Orchestrates the pipeline: validate query → build prompt → call LLM → parse → validate.
+
+**Why dependency injection (`client` as kwarg):**
+A module-level `client = anthropic.Anthropic()` singleton is a hidden global dependency. To test `parse_filter_query`, a test must either call the real API (non-deterministic, costs money, requires credentials in CI) or monkeypatch the module-level variable (`monkeypatch.setattr(ai_filter, 'client', mock)`). Monkeypatching a module internal is brittle — renaming the variable silently breaks every test.
+
+With DI, the test passes the mock directly:
+```python
+result = parse_filter_query("Show Arm A", client=make_mock_client('{"arm": "A", ...}'), ...)
+```
+No monkeypatching. No module state. The function is a pure transformation of its inputs. The caller (the Flask route) owns the client lifecycle.
+
+**Timeout and retry calibration:**
+```python
+response = client.messages.create(..., timeout=5.0)
+# Client created with: anthropic.Anthropic(max_retries=1)
+```
+
+The Anthropic SDK has `max_retries=2` by default. With `timeout=5.0`, worst-case backend time is `5s × (2+1) = 15s`. The frontend uses `AbortSignal.timeout(12000)` — 12 seconds. At 15s the browser cancels but the Flask worker is still blocked, tying up a thread for 3 extra seconds. Under load, this compounds.
+
+`max_retries=1` gives worst-case `5s × 2 = 10s`, safely under 12s. The browser and server timeout windows stay aligned. This is a correctness property, not a performance optimisation — the distinction matters because it cannot be deferred.
+
+**Why empty query is checked before the LLM call:**
+`test_parse_filter_query_empty_query_raises_before_llm_call` asserts `client.messages.create.assert_not_called()`. The empty-query check fires first, raises `ValueError('Query cannot be empty')`, and returns without consuming any API credits or latency. This is the correct early-return pattern: validate cheap preconditions before expensive I/O.
+
+---
+
+### `POST /ai-filter` route in `app.py` — thin adapter only
+
+The route is a facade. Its only job is HTTP concerns: parse body, call `parse_filter_query`, serialize response.
+
+```python
+@app.route('/ai-filter', methods=['POST'])
+def ai_filter():
+    body = request.get_json(silent=True)
+    if not body or 'query' not in body:
+        return jsonify({'error': 'Missing query'}), 400
+    try:
+        filters = parse_filter_query(query, client=_anthropic_client, ...)
+        return jsonify(filters)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
+        return jsonify({'error': 'AI filter unavailable. Please try again.'}), 500
+```
+
+**`ValueError → 400`, `Exception → 500`:**
+`ValueError` is the single exception type `ai_filter.py` raises for all expected failure modes: empty query, non-JSON response, missing keys, invalid values, unsupported query. `Exception` catches truly unexpected failures — network timeout, SDK crash — without leaking a stack trace. The two-bucket split makes the contract readable: `ValueError` is "the caller caused this", `Exception` is "something unexpected broke".
+
+**`_anthropic_client` created once at startup:**
+`app.py` already owns all startup singletons — `df`, `VALID_ARMS/DOSES/TUMORS`. The Anthropic client belongs in the same category. Creating it per-request would re-validate the API key and re-initialise retry/timeout config on every call. `_anthropic_client = anthropic.Anthropic(max_retries=1)` runs once; the route passes it into `parse_filter_query` via DI.
+
+**`load_dotenv` must be the first executable line in `app.py`:**
+`anthropic.Anthropic()` reads `ANTHROPIC_API_KEY` at instantiation. If `load_dotenv` runs after the client is created, the key is `None` and the client initialises silently with no credentials — the `AuthenticationError` only surfaces on the first API call. `load_dotenv(Path(__file__).parent / '.env')` is called immediately after the stdlib imports, before Flask, before `from ai_filter import`, before `from data import load_data`.
+
+---
+
+### Two frontend bugs fixed in `Visualisation.jsx`
+
+#### Bug 1: `res.ok` not checked before `.json()`
+
+The original `handleAiFilter`:
+```javascript
+const json = await res.json()    // called unconditionally
+if (json.error) { setAiError(json.error); return }
+```
+
+Flask in dev mode returns an HTML error page for any unhandled 500. Calling `.json()` on an HTML body throws `SyntaxError: Unexpected token '<'`. This falls into the outer `catch` which sets `"Could not connect to AI filter."` — the wrong error, pointing at the wrong layer. The connection succeeded; the server crashed. The fix:
+
+```javascript
+if (!res.ok) {
+  let msg = 'AI filter failed.'
+  try { const e = await res.json(); if (e.error) msg = e.error } catch {}
+  setAiError(msg)
+  return
+}
+const json = await res.json()
+```
+
+**Maintainability:** The two cases — HTTP failure and JSON parse failure — now have explicit branches. A developer debugging a 500 sees "AI filter failed." not "Could not connect." The diagnosis is correct.
+
+#### Bug 2: stale `aiError` after manual dropdown change
+
+`aiError` lives in `Visualisation.jsx` and is displayed in `FilterPanel.jsx`. When the user gets an AI error and then manually changes a dropdown, the error stays visible indefinitely — `setSelectedArm` does not clear `aiError`. `handleReset` already calls `setAiError(null)`. The manual handlers need the same treatment:
+
+```jsx
+// Before
+onArmChange={setSelectedArm}
+
+// After
+onArmChange={v => { setAiError(null); setSelectedArm(v) }}
+```
+
+**Maintainability:** The rule is now consistent and visible in JSX: any action that supersedes the AI result clears the error. Reset All clears it (already did). Manual dropdown change clears it (now does). The user is never looking at an error message that no longer describes the current state of the UI.
+
+---
+
+### Test strategy — why zero real API calls
+
+The test suite for `ai_filter.py` has four concern groups:
+
+| Group | What it tests | LLM involved? |
+|---|---|---|
+| 1. `validate_filters` | Normalization, type coercion, set membership, all 11 error cases | No |
+| 2. `parse_llm_response` | JSON parsing, JSONDecodeError → ValueError contract | No |
+| 2b. `build_system_prompt` | Valid values injected, unsupported instruction present | No |
+| 3. `parse_filter_query` | Orchestration wiring, empty-query guard, dose normalization | Mock only |
+| 4. `POST /ai-filter` | HTTP layer — 400 on missing body, 400 on bad LLM JSON, 200 on valid | Mock only |
+
+**Why no real API calls:** Non-determinism means the same query can return different JSON twice. A test asserting `result['arm'] == 'A'` for "Show Arm A patients" will pass 95% of the time and fail 5%. A flaky test is worse than no test — it trains the team to ignore failures. Real API tests also require `ANTHROPIC_API_KEY` in CI and add 1–3 seconds per call.
+
+**What actually tests the real LLM:** The Step 3 curl verification and a manual eval table:
+
+```python
+EVAL_CASES = [
+    ("Show Arm A patients only",             {"arm": "A",   "dose": "all",  "tumor_type": "all"}),
+    ("Display only HNSCC patients in Arm B", {"arm": "B",   "dose": "all",  "tumor_type": "HNSCC"}),
+    ("1800mg dose patients",                 {"arm": "all", "dose": "1800", "tumor_type": "all"}),
+    ("Hide patients with shrinkage > 30%",   "unsupported"),
+    ("HNSCC only, exclude Arm B",            "unsupported"),  # negation — current schema can't express
+]
+```
+
+These run manually against the real API before submission. The pass rate tells you whether the system prompt is good enough. This is the correct separation: unit tests verify code correctness; manual evals verify prompt quality.
+
+**The `ai_client` fixture — why it yields only the client:**
+An earlier draft yielded a tuple `(c, monkeypatch)`. `monkeypatch` is a built-in pytest fixture already injected into any test that declares it as a parameter. Threading it through a tuple serves no purpose and signals confusion about how pytest fixtures work. The fixture yields only what it owns — the Flask test client.
+
+---
+
+### Decisions summary
+
+| Decision | Alternative | Why rejected | Impact |
+|---|---|---|---|
+| LLM for query parsing | Rule-based regex | Assignment evaluates AI integration; LLM handles compound phrasing and scope gracefully | Latency cost is the tradeoff |
+| `validate_filters` is pure Python, not LLM | Validate inside LLM prompt | LLM output is untrusted — treat it like user input off the wire | Testable in isolation with no mock |
+| DI: `client` as kwarg | Module-level `client = anthropic.Anthropic()` | Hidden global makes function untestable without monkeypatching | Clean test seam |
+| Dynamic `build_system_prompt` | Hardcoded prompt string | Hardcoded values drift from CSV; three sources of truth | Single source: the DataFrame |
+| Normalize before validate | Validate raw LLM output | `" A "` (whitespace) and `"a"` (lowercase) are unambiguous intent — rejecting them is wrong at this boundary | Lenient at AI boundary, strict at HTTP boundary |
+| `max_retries=1, timeout=5.0` | SDK defaults (`max_retries=2`, no timeout) | Default worst-case = 15s, exceeds frontend's 12s timeout — thread leak | Backend and frontend timeouts stay aligned |
+| Dose always string | Return int for numeric doses | FilterPanel `<select>` values are strings; one explicit `parseInt` bridge | Type contract is predictable end-to-end |
+| `res.ok` check before `.json()` | Unconditional `.json()` | Flask 500 returns HTML; `.json()` throws SyntaxError, shows wrong error | Correct error message on server crash |
+| `setAiError(null)` on dropdown change | Only clear on Reset All | Stale error persists after user manually overrides — UI lies about current state | Feedback loop is honest |
+

@@ -95,11 +95,16 @@ export default function Visualisation() {
         body: JSON.stringify({ query }),
         signal: AbortSignal.timeout(12000),
       })
-      const json = await res.json()
-      if (json.error) {
-        setAiError(json.error)
+      if (!res.ok) {
+        let msg = 'AI filter failed.'
+        try {
+          const errJson = await res.json()
+          if (errJson.error) msg = errJson.error
+        } catch {}
+        setAiError(msg)
         return
       }
+      const json = await res.json()
       setSelectedArm(json.arm === 'all' ? 'all' : String(json.arm))
       setSelectedDose(json.dose === 'all' ? 'all' : String(json.dose))
       setSelectedTumor(
@@ -129,9 +134,18 @@ export default function Visualisation() {
           selectedTumor={selectedTumor}
           socMpfsWeeks={socMpfsWeeks}
           maxWeeks={maxWeeks}
-          onArmChange={setSelectedArm}
-          onDoseChange={setSelectedDose}
-          onTumorChange={setSelectedTumor}
+          onArmChange={v => {
+            setAiError(null)
+            setSelectedArm(v)
+          }}
+          onDoseChange={v => {
+            setAiError(null)
+            setSelectedDose(v)
+          }}
+          onTumorChange={v => {
+            setAiError(null)
+            setSelectedTumor(v)
+          }}
           onSocMpfsChange={setSocMpfsWeeks}
           onReset={handleReset}
           onAiFilter={handleAiFilter}
