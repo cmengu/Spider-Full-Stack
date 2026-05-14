@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import SummaryCard from '../components/SummaryCard.jsx'
+import { deriveStats } from '../utils/deriveStats.js'
 
 export default function Landing() {
   const [rows, setRows] = useState([])
@@ -69,14 +70,4 @@ export default function Landing() {
       </Link>
     </main>
   )
-}
-
-export function deriveStats(rows) {
-  const patients = new Set(rows.map(r => r.subject_id)).size
-  const arms = [...new Set(rows.map(r => r.arm))].sort().join(', ')
-  const doses = [...new Set(rows.map(r => Number(r.dose)))]
-    .sort((a, b) => a - b)
-    .map(d => `${d}mg`)
-    .join(', ')
-  return { patients, arms, doses }
 }

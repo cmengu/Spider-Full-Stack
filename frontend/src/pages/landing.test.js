@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { deriveStats } from './Landing.jsx'
+import { deriveStats } from '../utils/deriveStats.js'
 
 const ROWS = [
   { subject_id: '08-201', arm: 'A', dose: 1800, tumor_type: 'sqNSCLC', days: '47',  change: -1.62 },
