@@ -127,8 +127,8 @@ export default function Visualisation() {
   }
 
   return (
-    <div className="flex gap-6 px-8 py-6">
-      <aside className="w-56 shrink-0">
+    <div className="flex flex-col gap-6 px-8 py-6 md:flex-row">
+      <aside className="w-full shrink-0 md:w-56">
         <FilterPanel
           selectedArm={selectedArm}
           selectedDose={selectedDose}
