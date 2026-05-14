@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import SpiderPlot from '../components/SpiderPlot.jsx'
 import FilterPanel from '../components/FilterPanel.jsx'
+import Spinner from '../components/Spinner.jsx'
 import { buildPatientSeries } from '../utils/transformData'
 
 const DEFAULT_SOC = 10.5
@@ -159,7 +160,7 @@ export default function Visualisation() {
           Showing {series.length} of {totalPatients} patients
         </p>
 
-        {loading && <p className="text-gray-400 text-sm">Loading…</p>}
+        {loading && <Spinner />}
 
         {!loading && error && (
           <p className="text-sm text-red-600">Failed to load data: {error}</p>

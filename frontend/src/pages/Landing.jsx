@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import SummaryCard from '../components/SummaryCard.jsx'
+import Spinner from '../components/Spinner.jsx'
 import { deriveStats } from '../utils/deriveStats.js'
 
 export default function Landing() {
@@ -35,7 +36,7 @@ export default function Landing() {
     return (
       <main className="px-8 py-12">
         <h1 className="mb-2">Clinical Trial Explorer</h1>
-        <p className="text-gray-500">Loading…</p>
+        <Spinner />
       </main>
     )
   }
