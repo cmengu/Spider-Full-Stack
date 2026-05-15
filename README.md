@@ -3,6 +3,9 @@
 Clinical trial tumour-size spider plot with AI-powered natural language filtering.  
 Flask + Pandas backend · Vite + React frontend · Plotly chart · Claude Haiku AI filter.
 
+## add evals 
+
+
 ---
 
 ## Quick Start
