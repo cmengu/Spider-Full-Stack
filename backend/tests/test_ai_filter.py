@@ -3,7 +3,7 @@ Tests for ai_filter.py — grouped by concern:
   1. validate_filters     — pure function, zero Anthropic dependency
   2. parse_llm_response   — pure function, zero Anthropic dependency
   2b. build_system_prompt — prompt is code; test it like code
-  3. parse_filter_query   — mocked Anthropic client via DI (never calls real API)
+  3. parse_filter_query   — empty-query guard only; live LLM in test_eval_llm (eval mark)
   4. POST /ai-filter      — Flask test client integration (monkeypatch per-test)
 """
 
@@ -214,36 +214,7 @@ def test_system_prompt_injects_valid_values_not_hardcoded():
     assert '"A"' not in prompt  # hardcoded arm A must not appear
 
 
-# ── 3. parse_filter_query — mocked client, never calls real API ───────────────
-
-
-def test_parse_filter_query_arm_extracted():
-    client = make_mock_client('{"arm": "A", "dose": "all", "tumor_type": "HNSCC"}')
-    result = parse_filter_query(
-        'Show Arm A patients with HNSCC',
-        client=client,
-        valid_arms=VALID_ARMS,
-        valid_doses=VALID_DOSES,
-        valid_tumors=VALID_TUMORS,
-    )
-    assert result['arm'] == 'A'
-    assert result['tumor_type'] == 'HNSCC'
-
-
-def test_parse_filter_query_dose_int_from_model_normalized():
-    # Model returns integer 1800 — must emerge as string "1800" from the pipeline.
-    # arm=all, dose=1800, tumor=all is NOT all-all-all (dose is specific) so
-    # validate_filters must pass and return dose as a string.
-    client = make_mock_client('{"arm": "all", "dose": 1800, "tumor_type": "all"}')
-    result = parse_filter_query(
-        '1800mg patients',
-        client=client,
-        valid_arms=VALID_ARMS,
-        valid_doses=VALID_DOSES,
-        valid_tumors=VALID_TUMORS,
-    )
-    assert result['dose'] == '1800'
-    assert isinstance(result['dose'], str)
+# ── 3. parse_filter_query — early-exit path only (live parsing covered in test_eval_llm) ─
 
 
 def test_parse_filter_query_empty_query_raises_before_llm_call():
@@ -257,32 +228,6 @@ def test_parse_filter_query_empty_query_raises_before_llm_call():
             valid_tumors=VALID_TUMORS,
         )
     client.messages.create.assert_not_called()
-
-
-def test_parse_filter_query_bad_json_raises_valueerror():
-    client = make_mock_client('Sorry, I cannot help with that.')
-    with pytest.raises(ValueError, match='non-JSON'):
-        parse_filter_query(
-            'Some ambiguous query',
-            client=client,
-            valid_arms=VALID_ARMS,
-            valid_doses=VALID_DOSES,
-            valid_tumors=VALID_TUMORS,
-        )
-
-
-def test_parse_filter_query_unsupported_raises_valueerror():
-    client = make_mock_client(
-        '{"arm": "all", "dose": "all", "tumor_type": "all", "unsupported": true}'
-    )
-    with pytest.raises(ValueError, match='not supported'):
-        parse_filter_query(
-            'Hide patients with tumour shrinkage greater than 30%',
-            client=client,
-            valid_arms=VALID_ARMS,
-            valid_doses=VALID_DOSES,
-            valid_tumors=VALID_TUMORS,
-        )
 
 
 # ── 4. POST /ai-filter endpoint — Flask test client ───────────────────────────
