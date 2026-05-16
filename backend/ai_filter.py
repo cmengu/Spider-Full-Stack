@@ -87,8 +87,9 @@ def validate_filters(
             'or tumor type (sqNSCLC, nsNSCLC, HNSCC).'
         )
 
-    # Normalize
-    arm = str(parsed['arm']).strip()
+    # Normalize — arm: uppercase single-letter arms; preserve literal "all" (any casing)
+    _arm_raw = str(parsed['arm']).strip()
+    arm = 'all' if _arm_raw.lower() == 'all' else _arm_raw.upper()
 
     dose_raw = parsed['dose']
     dose_str = str(dose_raw).strip().lower()
@@ -104,7 +105,9 @@ def validate_filters(
                 'Try rephrasing your query.'
             )
 
-    tumor = str(parsed['tumor_type']).strip()
+    tumor_map = {t.lower(): t for t in valid_tumors}
+    tumor_raw = str(parsed['tumor_type']).strip().lower()
+    tumor = tumor_map.get(tumor_raw, tumor_raw)
 
     # Validate against live sets
     if arm != 'all' and arm not in valid_arms:
