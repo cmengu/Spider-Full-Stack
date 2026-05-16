@@ -1,0 +1,194 @@
+[
+  {
+    "id": "exact-arm-a",
+    "category": "exact",
+    "query": "Show Arm A",
+    "expected": {"arm": "A", "dose": "all", "tumor_type": "all"}
+  },
+  {
+    "id": "exact-arm-b",
+    "category": "exact",
+    "query": "Arm B only",
+    "expected": {"arm": "B", "dose": "all", "tumor_type": "all"}
+  },
+  {
+    "id": "exact-dose-1800",
+    "category": "exact",
+    "query": "1800mg dose",
+    "expected": {"arm": "all", "dose": "1800", "tumor_type": "all"}
+  },
+  {
+    "id": "exact-dose-3000",
+    "category": "exact",
+    "query": "3000mg",
+    "expected": {"arm": "all", "dose": "3000", "tumor_type": "all"}
+  },
+  {
+    "id": "exact-tumor-sqnsclc",
+    "category": "exact",
+    "query": "sqNSCLC patients",
+    "expected": {"arm": "all", "dose": "all", "tumor_type": "sqNSCLC"}
+  },
+  {
+    "id": "exact-tumor-nsnsclc",
+    "category": "exact",
+    "query": "nsNSCLC only",
+    "expected": {"arm": "all", "dose": "all", "tumor_type": "nsNSCLC"}
+  },
+  {
+    "id": "exact-tumor-hnscc",
+    "category": "exact",
+    "query": "HNSCC",
+    "expected": {"arm": "all", "dose": "all", "tumor_type": "HNSCC"}
+  },
+  {
+    "id": "synonym-squamous-lung",
+    "category": "synonym",
+    "query": "squamous non-small cell lung cancer patients",
+    "expected": {"arm": "all", "dose": "all", "tumor_type": "sqNSCLC"}
+  },
+  {
+    "id": "synonym-nonsquamous-lung",
+    "category": "synonym",
+    "query": "non-squamous lung cancer",
+    "expected": {"arm": "all", "dose": "all", "tumor_type": "nsNSCLC"}
+  },
+  {
+    "id": "synonym-head-neck",
+    "category": "synonym",
+    "query": "head and neck cancer patients",
+    "expected": {"arm": "all", "dose": "all", "tumor_type": "HNSCC"}
+  },
+  {
+    "id": "synonym-head-neck-squamous",
+    "category": "synonym",
+    "query": "head and neck squamous cell carcinoma",
+    "expected": {"arm": "all", "dose": "all", "tumor_type": "HNSCC"}
+  },
+  {
+    "id": "synonym-dose-written-1800",
+    "category": "synonym",
+    "query": "patients on eighteen hundred milligrams",
+    "expected": {"arm": "all", "dose": "1800", "tumor_type": "all"}
+  },
+  {
+    "id": "synonym-dose-written-3000",
+    "category": "synonym",
+    "query": "three thousand mg cohort",
+    "expected": {"arm": "all", "dose": "3000", "tumor_type": "all"}
+  },
+  {
+    "id": "case-arm-lowercase",
+    "category": "case",
+    "query": "arm a patients",
+    "expected": {"arm": "A", "dose": "all", "tumor_type": "all"}
+  },
+  {
+    "id": "case-arm-uppercase",
+    "category": "case",
+    "query": "ARM B",
+    "expected": {"arm": "B", "dose": "all", "tumor_type": "all"}
+  },
+  {
+    "id": "case-hnscc-lowercase",
+    "category": "case",
+    "query": "hnscc patients",
+    "expected": {"arm": "all", "dose": "all", "tumor_type": "HNSCC"}
+  },
+  {
+    "id": "combined-arm-dose",
+    "category": "combined",
+    "query": "Arm A patients on 1800mg",
+    "expected": {"arm": "A", "dose": "1800", "tumor_type": "all"}
+  },
+  {
+    "id": "combined-arm-tumor",
+    "category": "combined",
+    "query": "HNSCC patients in Arm B",
+    "expected": {"arm": "B", "dose": "all", "tumor_type": "HNSCC"}
+  },
+  {
+    "id": "combined-dose-tumor",
+    "category": "combined",
+    "query": "sqNSCLC patients receiving 3000mg",
+    "expected": {"arm": "all", "dose": "3000", "tumor_type": "sqNSCLC"}
+  },
+  {
+    "id": "combined-all-three",
+    "category": "combined",
+    "query": "Arm A, 1800mg, sqNSCLC",
+    "expected": {"arm": "A", "dose": "1800", "tumor_type": "sqNSCLC"}
+  },
+  {
+    "id": "combined-synonym-arm-tumor",
+    "category": "combined",
+    "query": "head and neck patients in arm A",
+    "expected": {"arm": "A", "dose": "all", "tumor_type": "HNSCC"}
+  },
+  {
+    "id": "unsupported-shrinkage",
+    "category": "unsupported",
+    "query": "patients with tumour shrinkage greater than 30 percent",
+    "expect_error": true,
+    "expect_match": "not supported"
+  },
+  {
+    "id": "unsupported-responders",
+    "category": "unsupported",
+    "query": "best responders only",
+    "expect_error": true,
+    "expect_match": "not supported"
+  },
+  {
+    "id": "unsupported-date",
+    "category": "unsupported",
+    "query": "patients enrolled after January 2024",
+    "expect_error": true,
+    "expect_match": "not supported"
+  },
+  {
+    "id": "unsupported-change-value",
+    "category": "unsupported",
+    "query": "show me patients where target lesion change is below minus 50",
+    "expect_error": true,
+    "expect_match": "not supported"
+  },
+  {
+    "id": "ambiguous-squamous-alone",
+    "category": "ambiguous",
+    "query": "squamous cancer patients",
+    "accept_any": [
+      {"arm": "all", "dose": "all", "tumor_type": "sqNSCLC"},
+      {"arm": "all", "dose": "all", "tumor_type": "HNSCC"}
+    ],
+    "notes": "squamous maps to both sqNSCLC and HNSCC — model picks one consistently but choice is arbitrary"
+  },
+  {
+    "id": "ambiguous-lung-cancer",
+    "category": "ambiguous",
+    "query": "lung cancer patients",
+    "accept_any": [
+      {"arm": "all", "dose": "all", "tumor_type": "sqNSCLC"},
+      {"arm": "all", "dose": "all", "tumor_type": "nsNSCLC"}
+    ],
+    "notes": "lung cancer maps to both sqNSCLC and nsNSCLC — both are NSCLC subtypes"
+  },
+  {
+    "id": "ambiguous-high-dose",
+    "category": "ambiguous",
+    "query": "high dose patients",
+    "accept_any": [
+      {"arm": "all", "dose": "3000", "tumor_type": "all"}
+    ],
+    "notes": "high dose colloquially maps to 3000mg but is not explicit — acceptable if model maps it, not a failure if it raises"
+  },
+  {
+    "id": "ambiguous-low-dose",
+    "category": "ambiguous",
+    "query": "low dose patients",
+    "accept_any": [
+      {"arm": "all", "dose": "1800", "tumor_type": "all"}
+    ],
+    "notes": "low dose colloquially maps to 1800mg but is not explicit — acceptable if model maps it, not a failure if it raises"
+  }
+]
