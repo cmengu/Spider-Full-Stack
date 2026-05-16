@@ -176,6 +176,15 @@ def test_parse_llm_response_valid_json():
     }
 
 
+def test_parse_llm_response_strips_markdown_json_fence():
+    raw = '```json\n{"arm": "A", "dose": "all", "tumor_type": "all"}\n```'
+    assert parse_llm_response(raw) == {
+        'arm': 'A',
+        'dose': 'all',
+        'tumor_type': 'all',
+    }
+
+
 def test_parse_llm_response_non_json_raises_valueerror_not_jsondecodeerror():
     # Must raise ValueError (caught by endpoint) not JSONDecodeError (falls to 500)
     with pytest.raises(ValueError, match='non-JSON'):

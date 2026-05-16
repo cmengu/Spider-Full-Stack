@@ -33,6 +33,10 @@ def build_system_prompt(
         f'{{"arm": {arm_opts}, "dose": {dose_opts}, "tumor_type": {tumor_opts}}}\n'
         'Rules:\n'
         '- Use "all" for any filter the user did not mention.\n'
+        '- If the user only gives a broad cancer description that could match more than one '
+        'tumour type (e.g. "lung cancer" without squamous vs non-squamous detail), still pick '
+        'one tumour_type from the allowed list and set arm and dose to "all" — do not set '
+        'unsupported solely because the case is broad.\n'
         '- If the request cannot be expressed using arm, dose, or tumor type '
         '(e.g. filtering by numeric change values, response rates, or dates), '
         'set all three to "all" AND add "unsupported": true to the object.\n'
@@ -41,14 +45,33 @@ def build_system_prompt(
     )
 
 
+def _strip_optional_json_fence(raw: str) -> str:
+    """
+    Haiku occasionally wraps JSON in ``` or ```json fences despite the system prompt.
+    Strip a single wrapping fence if present; otherwise return raw trimmed text.
+    """
+    text = raw.strip()
+    if not text.startswith('```'):
+        return text
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return text
+    if lines[0].strip().startswith('```'):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == '```':
+        lines = lines[:-1]
+    return '\n'.join(lines).strip()
+
+
 def parse_llm_response(raw: str) -> dict:
     """
     Parse raw LLM text into a dict.
     Raises ValueError (not JSONDecodeError) so callers catch one exception type.
     Never leaks raw model output beyond a 120-char truncated snippet in the message.
     """
+    text = _strip_optional_json_fence(raw)
     try:
-        return json.loads(raw)
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f'Model returned non-JSON output: {raw[:120]!r}'
