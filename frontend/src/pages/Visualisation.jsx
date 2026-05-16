@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import SpiderPlot from '../components/SpiderPlot.jsx'
 import FilterPanel from '../components/FilterPanel.jsx'
 import Spinner from '../components/Spinner.jsx'
@@ -30,7 +30,22 @@ export default function Visualisation() {
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState(null)
 
-  const hasCapturedTotal = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      await Promise.resolve()
+      if (cancelled) return
+      try {
+        const r = await fetch('/api/spider')
+        if (!r.ok) return
+        const data = await r.json()
+        if (!cancelled) setTotalPatients(buildPatientSeries(data).length)
+      } catch {
+        // non-critical — total stays 0
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -38,7 +53,6 @@ export default function Visualisation() {
     let cancelled = false
 
     ;(async () => {
-      // Defer setState so it is not synchronous in the effect body (eslint react-hooks/set-state-in-effect).
       await Promise.resolve()
       if (cancelled) return
       setLoading(true)
@@ -51,10 +65,6 @@ export default function Visualisation() {
         const data = await r.json()
         if (cancelled) return
         setRows(data)
-        if (!hasCapturedTotal.current) {
-          setTotalPatients(buildPatientSeries(data).length)
-          hasCapturedTotal.current = true
-        }
         setLoading(false)
       } catch (err) {
         if (cancelled || err.name === 'AbortError') return
