@@ -1479,3 +1479,208 @@ An earlier draft yielded a tuple `(c, monkeypatch)`. `monkeypatch` is a built-in
 | `res.ok` check before `.json()` | Unconditional `.json()` | Flask 500 returns HTML; `.json()` throws SyntaxError, shows wrong error | Correct error message on server crash |
 | `setAiError(null)` on dropdown change | Only clear on Reset All | Stale error persists after user manually overrides — UI lies about current state | Feedback loop is honest |
 
+---
+
+## Phase 8: Eval Suite — LLM Parsing Verification
+
+### The problem with the original test strategy
+
+The previous section documented "why zero real API calls" as a deliberate design decision. That was the right call for the unit test suite. It is the wrong call for the AI filter as a whole.
+
+Here is what the mocked `parse_filter_query` tests actually do: `make_mock_client('{"arm": "A", ...}')` hardcodes the response, then the test asserts `result['arm'] == 'A'`. That is not testing the LLM. That is testing that `validate_filters` passes valid input through — which is already covered by the section-1 pure-function tests. Five tests, zero new signal. They survive prompt changes, model swaps, and refactors without ever failing. That is the definition of a lying test.
+
+The product's actual risk — "will Claude correctly extract `sqNSCLC` from 'squamous lung cancer'?" — is completely unverified by the mocked suite. False confidence is worse than no tests because it suppresses the question.
+
+The original manual eval table was the right instinct:
+
+```python
+EVAL_CASES = [
+    ("Show Arm A patients only", {"arm": "A", "dose": "all", "tumor_type": "all"}),
+    ...
+]
+```
+
+This plan formalises that instinct into a parametrised, runnable, versioned eval suite.
+
+---
+
+### Architecture: data-driven parametrised eval
+
+**Three files, three jobs, no overlap:**
+
+```
+eval_cases.json     — ground truth: query → expected output. No logic.
+test_eval_llm.py    — dumb runner: reads JSON, calls real API, asserts. Never changes.
+pytest.ini          — registers eval marker. One job.
+```
+
+**Why JSON and not inline `@pytest.mark.parametrize`:**
+A Python parametrize list requires Python knowledge to edit. JSON does not. A clinician or QA engineer can add a case by editing one object. The runner never changes. Cases and runner change on completely independent schedules — that is the correct coupling.
+
+The failure mode of inline parametrize: as the list grows past 30 entries, the test file becomes unreadable. Reviewers stop auditing individual cases. The dataset silently accumulates redundant or wrong cases nobody questions because they are buried in Python.
+
+**Why a separate `test_eval_llm.py` and not appended to `test_ai_filter.py`:**
+Unit tests are fast, offline, always-run, require no credentials. Eval tests are slow, live-API, manually-triggered, require `ANTHROPIC_API_KEY`. Mixing them in one file means anyone running `pytest tests/test_ai_filter.py` accidentally triggers live API calls and needs a key. The offline guarantee — "I can run the unit tests without any external dependency" — is a hard requirement for a usable test suite.
+
+**Why `@pytest.mark.eval` and not a `make eval` target:**
+The marker is pytest-native. It composes with `-m "not eval"` which is the standard CI pattern. `make eval` is build-tool coupling — it breaks on machines without Make, requires documentation, and does not integrate with pytest's output format. The marker costs one `pytest.ini` entry and works everywhere pytest works.
+
+**Why not a `conftest.py` fixture for the real client:**
+`conftest.py` is auto-imported by every test file in the directory. A `real_anthropic_client` fixture there implies any test could use a live API call — a scope mismatch. Also: `pytest.skip()` inside a `conftest` fixture fires at setup time, producing `ERROR` in the output instead of `SKIP`. Inside the test body it produces a clean `s`. The distinction matters when reading CI output at 2am.
+
+---
+
+### Defensive normalisation at the AI boundary
+
+`validate_filters` originally had no case normalisation for arm or tumor:
+
+```python
+arm = str(parsed['arm']).strip()               # .strip() only
+tumor = str(parsed['tumor_type']).strip()      # .strip() only
+```
+
+Claude returning `"a"` instead of `"A"` raised `ValueError: "a" is not a recognised arm`. The user typed a valid query. The rejection was caused by an internal casing assumption leaking out as a user-facing error.
+
+**The fix and why each field is handled differently:**
+
+```python
+arm = str(parsed['arm']).strip().upper()
+```
+Arm values are single letters. `.upper()` is safe and total — there are no mixed-case arm codes.
+
+```python
+tumor_map = {t.lower(): t for t in valid_tumors}
+tumor_raw = str(parsed['tumor_type']).strip().lower()
+tumor = tumor_map.get(tumor_raw, tumor_raw)
+```
+Tumor codes have internal mixed case: `sqNSCLC`, `nsNSCLC`, `HNSCC`. `.upper()` produces `SQNSCLC` — not in the valid set, wrong rejection. The lookup map recovers canonical casing from the live valid set. If Claude returns something entirely unknown, `tumor_map.get(tumor_raw, tumor_raw)` falls through to the validation check and raises correctly. The fallback is the raw value, not a default — unknown input still fails, just cleanly.
+
+**Dose is unchanged.** `str(int(str(dose_raw).strip()))` strips casing by converting to a number. Already correct.
+
+**The design principle:** At the boundary between external system output (Claude) and internal application state, normalise aggressively. The HTTP boundary (`/data?arms=a`) is strict — a human sent that, wrong casing is a caller error worth a 400. The AI boundary is lenient — a model sent that, casing variation is a model behaviour worth normalising. Two different trust levels, two different contracts.
+
+---
+
+### Layer separation: where documentation belongs
+
+The `eval_cases.json` fixture has a `notes` field on every `accept_any` case:
+
+```json
+{
+  "id": "ambiguous-squamous-alone",
+  "query": "squamous cancer patients",
+  "accept_any": [
+    {"arm": "all", "dose": "all", "tumor_type": "sqNSCLC"},
+    {"arm": "all", "dose": "all", "tumor_type": "HNSCC"}
+  ],
+  "notes": "squamous maps to both sqNSCLC and HNSCC — model picks one consistently but choice is arbitrary"
+}
+```
+
+`notes` is a plain string. It has no logic. It appears only when an `accept_any` assertion fails — printed in the failure output so the person debugging immediately understands why the case is structured the way it is.
+
+**Why `notes` stays in the JSON and never propagates to production code:**
+
+`notes` is metadata about a test case — it explains why a test is structured a certain way. That is a test-layer concern. Writing it into `ai_filter.py` or `app.py` would be explaining test decisions in production code.
+
+The failure mode of propagating it: six months later someone reads `validate_filters` and sees a comment referencing "eval case ambiguous-squamous-alone." That comment is now coupled to a specific test case ID that may have been renamed or deleted. The production code has acquired a dependency on test naming conventions. That is backwards coupling — test infrastructure leaking upward into production code.
+
+**The one marginal exception:** `build_system_prompt` is where the squamous ambiguity originates. There is an argument for:
+
+```python
+# "squamous" alone maps to both sqNSCLC and HNSCC — model picks one; accepted as known ambiguity
+```
+
+But even that is borderline. The ambiguity is a domain fact, not a code fact. A developer reading the CSV will see both squamous tumor types and understand. The comment adds noise without adding understanding the code does not already provide. The decision: no comment in production code. The `notes` field in the JSON is sufficient.
+
+---
+
+### Ambiguous cases: `accept_any` not `expect_error`
+
+Four queries in the eval dataset cannot have a single correct answer:
+
+| Query | Ambiguity |
+|---|---|
+| "squamous cancer patients" | Both sqNSCLC and HNSCC are squamous |
+| "lung cancer patients" | Both sqNSCLC and nsNSCLC are lung cancer |
+| "high dose patients" | Colloquially 3000mg but not explicit |
+| "low dose patients" | Colloquially 1800mg but not explicit |
+
+**Why `accept_any` and not `expect_error`:**
+
+The `unsupported` flag was designed for queries that cannot be expressed as arm/dose/tumor at all — response rates, dates, numeric changes. "Squamous cancer" is a valid tumor-type query. Raising an error tells the user "I don't understand squamous cancer" — that is a lie. The system understands it; there are just two matches. Erroring on valid medical terminology to avoid ambiguity is a worse product decision than picking one.
+
+`accept_any` is honest: it documents the ambiguity, passes either reasonable answer, and catches a completely wrong parse (kidney cancer, wrong field, empty output). It is a loose lower bound, not a precise assertion — and that is the right contract for ambiguous input.
+
+**The failure mode of `accept_any`:** It passes silently when the model picks either answer. That looks like success. The user querying "squamous cancer" still does not know which patients they are seeing. `accept_any` documents the gap; it does not close it. The proper fix — a `"confidence": "high|low"` response field that triggers a clarification prompt — was evaluated and explicitly deferred. The valid value space is small enough that true ambiguity is rare. In production, this would be the first thing added.
+
+---
+
+### What the eval suite actually proves vs what it does not
+
+**Proves:**
+- The system prompt, as currently written, causes Claude to correctly parse the 25 non-ambiguous cases
+- Synonym mapping works: plain English medical descriptions map to internal codes
+- Case normalisation works: lowercase input from the model normalises before hitting the validator
+- Combined extraction works: all three fields extracted correctly in a single query
+- The `unsupported` flag fires on out-of-scope queries
+- Model output casing variations do not cause false rejections
+
+**Does not prove:**
+- That a prompt change did not break something — the eval must be re-run manually after every prompt edit
+- That a model upgrade does not degrade parsing — same, re-run required
+- That the `unsupported` cases fail for the right reason — `expect_error: true` passes any `ValueError`, including the all-all-all guard firing when the model cannot parse a query instead of correctly flagging it unsupported. These are two different failures with one test shape.
+- That latency is acceptable under load — the eval runs one call at a time sequentially
+
+**Why the eval is still worth having despite these gaps:**
+An eval that proves eight things and misses four is better than a mocked suite that proves nothing about the LLM while appearing to test it. The gaps are documented. The mocked tests were not — they just silently passed.
+
+---
+
+### Deleted tests and why
+
+Four tests were deleted from `test_ai_filter.py`:
+
+| Deleted | Reason |
+|---|---|
+| `test_parse_filter_query_arm_extracted` | Tests `validate_filters` through a wrapper. Already covered by `test_validate_filters_valid_arm_only`. |
+| `test_parse_filter_query_dose_int_from_model_normalized` | Tests int coercion through a wrapper. Already covered by `test_validate_filters_dose_int_coerced_to_string`. |
+| `test_parse_filter_query_bad_json_raises_valueerror` | Tests `parse_llm_response` through a wrapper. Already covered by `test_parse_llm_response_non_json_raises_valueerror_not_jsondecodeerror`. |
+| `test_parse_filter_query_unsupported_raises_valueerror` | Tests unsupported flag through a wrapper. Already covered by `test_validate_filters_unsupported_flag_raises_valueerror`. |
+
+**The one kept:**
+
+```python
+def test_parse_filter_query_empty_query_raises_before_llm_call():
+    client = make_mock_client('{}')
+    with pytest.raises(ValueError, match='empty'):
+        parse_filter_query('', client=client, ...)
+    client.messages.create.assert_not_called()   # ← the only reason this test exists
+```
+
+`assert_not_called()` is the only thing in the entire suite that guards the early-exit path. Delete this test and someone can remove the `if not query` guard with no failing test. The mock is not testing the LLM here — it is verifying that the LLM is never reached on empty input. That is a contract worth asserting.
+
+**Test count after:**
+
+| File | Before | After |
+|---|---|---|
+| `test_ai_filter.py` | 25 | 21 |
+| `test_eval_llm.py` | 0 | 29 |
+| **Total** | **25** | **50** |
+
+Fewer unit tests that mean something. More eval tests that cover the actual product risk. The tradeoff is correct.
+
+---
+
+### Decisions summary — eval suite
+
+| Decision | Alternative | Why rejected | Failure mode if wrong decision taken |
+|---|---|---|---|
+| Real API calls in eval | Mock client | Mocking validates the prompt was sent, not that Claude parsed it — the current broken state | Prompt regressions, model swaps, casing changes all invisible |
+| JSON fixture | Inline parametrize | Python knowledge required to add cases; 50-entry parametrize list is unreadable | Dataset grows unaudited; wrong cases accumulate |
+| Separate `test_eval_llm.py` | Append to `test_ai_filter.py` | Breaks offline guarantee; API key required for unit tests | CI fails without credentials; devs avoid running tests locally |
+| `eval` marker | `make eval` target | Build-tool coupling; breaks on machines without Make | Eval never runs because the command is not portable |
+| `notes` in JSON only | Comments in `ai_filter.py` | Backwards coupling — test naming conventions leak into production code | Comment references renamed test case; confusion about what is still true |
+| `accept_any` for ambiguous | `expect_error` | Ambiguous queries are valid user intent; erroring on "squamous cancer" is dishonest | User gets 400 on a valid query; trust in the filter erodes |
+| Arm `.upper()`, tumor lookup map | No normalisation | Claude casing varies by query and model version — validator rejects valid intent | Case-variant outputs cause 400s; users cannot explain why their query failed |
+| Delete 4 mocked tests | Keep them | They add zero signal while consuming trust; a green lying test is worse than no test | Developers believe the LLM path is tested; prompt regressions go unnoticed |
