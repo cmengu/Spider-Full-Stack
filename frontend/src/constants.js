@@ -13,3 +13,5 @@ export const COLOR_MAP = {
   'ARM B 1800 mg': '#90CAF9',
   'ARM B 3000 mg': '#1565C0',
 }
+
+export const BRAND_ACTION_COLOR = '#C2185B'

@@ -4,6 +4,8 @@ import SummaryCard from '../components/SummaryCard.jsx'
 import Spinner from '../components/Spinner.jsx'
 import { deriveStats } from '../utils/deriveStats.js'
 
+const STUDY_LABEL = 'Phase II Oncology Study'
+
 export default function Landing() {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
@@ -35,6 +37,7 @@ export default function Landing() {
   if (loading) {
     return (
       <main className="px-8 py-12">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-brand">{STUDY_LABEL}</p>
         <h1 className="mb-2">Clinical Trial Explorer</h1>
         <Spinner />
       </main>
@@ -44,6 +47,7 @@ export default function Landing() {
   if (error) {
     return (
       <main className="px-8 py-12">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-brand">{STUDY_LABEL}</p>
         <h1 className="mb-2">Clinical Trial Explorer</h1>
         <p className="text-sm text-red-600">Failed to load data: {error}</p>
       </main>
@@ -52,6 +56,7 @@ export default function Landing() {
 
   return (
     <main className="px-8 py-12">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-brand">{STUDY_LABEL}</p>
       <h1 className="mb-2">Clinical Trial Explorer</h1>
       <p className="mb-10 text-gray-500">
         Tumour size change from baseline — spider plot dashboard
@@ -65,7 +70,7 @@ export default function Landing() {
 
       <Link
         to="/visualisation"
-        className="inline-block rounded-md bg-gray-900 px-6 py-3 text-sm font-medium text-white hover:bg-gray-700"
+        className="inline-block rounded-md bg-brand px-6 py-3 text-sm font-semibold text-white hover:bg-brand-dark transition-colors"
       >
         Explore Spider Plot →
       </Link>

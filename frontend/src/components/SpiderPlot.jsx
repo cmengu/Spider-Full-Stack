@@ -1,7 +1,7 @@
 import { useMemo, useCallback, useRef } from 'react'
 import _createPlotlyComponent from 'react-plotly.js/factory'
 import Plotly from 'plotly.js-dist-min'
-import { COLOR_MAP } from '../constants'
+import { COLOR_MAP, BRAND_ACTION_COLOR } from '../constants'
 
 // .default fallback: Vite's CJS interop wraps the module differently depending
 // on whether the subpath was pre-bundled; this handles both shapes safely.
@@ -47,7 +47,7 @@ function makeVLine(x) {
     x1: x,
     y0: 0,
     y1: 1,
-    line: { color: '#888', width: 1.5, dash: 'dash' },
+    line: { color: BRAND_ACTION_COLOR, width: 1.5, dash: 'dash' },
   }
 }
 
@@ -60,7 +60,7 @@ function makeRightAnnotation(y, text) {
     text,
     xanchor: 'left',
     showarrow: false,
-    font: { size: 11, color: '#333' },
+    font: { size: 11, color: '#6b6375' },
   }
 }
 
@@ -74,7 +74,7 @@ function makeTopAnnotation(x, text) {
     xanchor: 'center',
     yanchor: 'bottom',
     showarrow: false,
-    font: { size: 11, color: '#666' },
+    font: { size: 11, color: BRAND_ACTION_COLOR },
   }
 }
 
@@ -158,7 +158,7 @@ export default function SpiderPlot({ series, socMpfsWeeks }) {
       margin: { r: CHART_MARGIN_RIGHT, t: 40, b: 60, l: 70 },
       hovermode: 'closest',
       plot_bgcolor: 'white',
-      paper_bgcolor: 'white',
+      paper_bgcolor: 'var(--color-surface)',
     }
   }, [seriesBounds, socMpfsWeeks])
 

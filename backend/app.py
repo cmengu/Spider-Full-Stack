@@ -2,6 +2,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Final
 
 from dotenv import load_dotenv
 
@@ -39,7 +40,7 @@ VALID_TUMORS = {str(t) for t in df['tumor_type'].unique()}
 _anthropic_client = anthropic.Anthropic(max_retries=1)
 
 # Fixed response shape — tuple so accidental mutation cannot add columns silently
-RESPONSE_COLUMNS = ('subject_id', 'arm', 'days', 'change', 'dose', 'tumor_type')
+RESPONSE_COLUMNS: Final = ('subject_id', 'arm', 'days', 'change', 'dose', 'tumor_type')
 
 print(f'[startup] Loaded {len(df)} rows, {df["subject_id"].nunique()} patients')
 print(f'[startup] Valid: arms={sorted(VALID_ARMS)} doses={sorted(VALID_DOSES)} tumors={sorted(VALID_TUMORS)}')

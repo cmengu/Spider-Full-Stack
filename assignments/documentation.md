@@ -55,8 +55,42 @@ pip was coming from miniconda base. A plain `python3 -m venv backend/venv` was u
 CORS(app, origins=[re.compile(r'http://localhost:\d+')])
 ```
 
+> **Senior Dev Note — Scalability & Maintainability:**
+> - The regex `localhost:\d+` is intentionally broad for local dev. In production, replace it with an explicit allowlist driven by an env var (`ALLOWED_ORIGINS=https://app.example.com`) — a regex that matches any port is a misconfiguration in prod.
+> - `CORS(app, ...)` applies the same policy globally to every route. As the API grows, sensitive endpoints (admin, mutations) should have stricter per-route policies using `@cross_origin()` with tighter settings rather than inheriting the global one.
+> - `supports_credentials` is `False` here because there's no auth. The moment sessions or JWTs-in-cookies are introduced, `supports_credentials=True` must be set alongside a non-wildcard origin — browsers reject `credentials: true` with a wildcard origin.
+> - `flask-cors` is a thin wrapper around response headers. If the app later moves behind nginx or a CDN, CORS headers can conflict (doubled headers, wrong values). At that point, handle CORS at the proxy layer and remove `flask-cors` entirely.
+
 **Vite proxy configured from day 1**
 `vite.config.js` was updated with the proxy before writing any frontend fetch calls. This means the frontend always uses relative paths like `fetch('/api/spider')` and never has a hardcoded port — the Vite dev server is the single entry point.
+
+`vite.config.js` does four things in this project:
+```js
+plugins: [tailwindcss(), react()]       // 1. Compile Tailwind + JSX
+optimizeDeps: { include: [...plotly] }  // 2. Pre-bundle Plotly (CJS → ESM)
+test: { environment: 'jsdom' }          // 3. Vitest runs in a browser-like env
+server: { proxy: { '/api': ... } }      // 4. Forward /api/* → Flask on :5001
+```
+
+> **Senior Dev Note — Scalability & Maintainability:**
+> - The Vite proxy is a **dev-only tool** — it disappears in production builds. In a real deployment you'd need a reverse proxy (nginx, Caddy) or a monorepo serving both from the same origin to avoid CORS entirely.
+> - The proxy target `http://localhost:5001` is hardcoded. As the project grows, extract this into an env var (`VITE_API_URL`) so staging/prod targets can differ without touching config code.
+> - `vite.config.js` accumulates concerns over time (plugins, proxy, test env, optimizeDeps). Once it exceeds ~40 lines, split test config into `vitest.config.js` so build config and test config can evolve independently.
+> - `optimizeDeps.include` for Plotly is a workaround for esbuild not handling CJS bundles cleanly. If Plotly ships proper ESM in a future version, that block can be removed — leave a comment so it's not treated as load-bearing forever.
+
+**The rewrite rule lives in `frontend/vite.config.js`**
+The full proxy block at the bottom of the file:
+```js
+server: {
+  proxy: {
+    '/api': {
+      target: 'http://localhost:5001',
+      rewrite: (path) => path.replace(/^\/api/, ''),
+    },
+  },
+},
+```
+`rewrite` is a function Vite runs on the path before forwarding. `path.replace(/^\/api/, '')` strips `/api` from the start of the path — `/api/spider` becomes `/spider`. The `^` anchors the match to the start so only paths beginning with `/api` are affected.
 
 **Flask route is `GET /spider`, not `GET /api/spider`**
 The assignment spec defines the endpoint as `GET /spider`. The `/api` prefix only exists in the frontend as a proxy signal. The Vite proxy rewrites the path before forwarding to Flask — Flask never sees `/api`.
@@ -65,6 +99,12 @@ The assignment spec defines the endpoint as `GET /spider`. The `/api` prefix onl
 
 **Double `API response: []` in the browser console**
 Seen as two identical log lines in DevTools. Caused by React 18 `StrictMode` which deliberately mounts every component twice in development to surface side effects. This is intentional behaviour, not a bug. It only happens in dev — never in production. `<StrictMode>` is in `main.jsx` and should be left in.
+
+> **Senior Dev Note — Scalability & Maintainability:**
+> - `StrictMode`'s double-mount is the earliest warning that a `useEffect` is not idempotent. If adding a new effect makes something break in dev but not prod, the effect is impure — fix it rather than removing `StrictMode`.
+> - As the app grows, every `useEffect` that fires a network request must have a cleanup function returning `controller.abort()`. `StrictMode` will expose missing cleanups immediately; without it they only surface as race conditions in production under slow networks.
+> - `StrictMode` does not catch everything — it only covers mount/unmount cycles. It won't catch stale closures, incorrect dependency arrays, or mutation of state directly. Pair it with the React ESLint plugin (`eslint-plugin-react-hooks`) for full coverage.
+> - In React 19, concurrent features are on by default everywhere. `StrictMode`'s double-invoke behaviour is no longer a dev-only simulation — it reflects real production behaviour. The cost of removing it now is much higher than it looks.
 
 **`Import "flask_cors" could not be resolved` Pylance warning in VS Code**
 VS Code's Pylance extension was using the system Python interpreter, which does not have `flask-cors` installed. Fixed by pointing VS Code to the venv interpreter: `Python: Select Interpreter` → `backend/venv/bin/python`. No code change needed — the code ran correctly throughout.
@@ -77,6 +117,26 @@ Flask logged a 404 for `GET /api/spider`. This happened because the request was 
 | Browser / frontend | `http://localhost:5173/api/spider` | Vite proxy strips `/api` → Flask `/spider` → 200 ✓ |
 | Direct to Flask | `http://localhost:5001/spider` | 200 ✓ |
 | Direct to Flask | `http://localhost:5001/api/spider` | 404 — no such route |
+
+> **Senior Dev Note — Scalability & Maintainability:**
+> - The `/api` prefix-as-proxy-signal is a local dev convention, not an API contract. If a second developer hits Flask directly and gets a 404, they'll waste time debugging — document the two-server mental model prominently in the project README so new contributors know the correct entry point.
+> - In production there is no Vite proxy. The frontend is a static bundle served from a CDN or nginx. At that point the `/api` prefix either needs to be handled by a real reverse proxy rule (nginx `location /api/`) or the frontend must switch to an absolute `VITE_API_URL` env var. Decide this before deploying — it's a breaking change if left unresolved.
+>
+>   **What is currently broken for production — 4 hardcoded fetch calls, all dead:**
+>   ```
+>   Landing.jsx:15        fetch('/api/spider')
+>   Visualisation.jsx:39  fetch('/api/spider')
+>   Visualisation.jsx:61  fetch(`/api/spider${params}`)
+>   Visualisation.jsx:103 fetch('/api/ai-filter')
+>   ```
+>   All use relative `/api/...` paths. Without the Vite proxy these go nowhere — the browser 404s against whatever is serving the frontend. There is also no `VITE_API_URL` env var, no `.env.production` file, and no nginx config. The fix is:
+>   ```js
+>   // replace every hardcoded fetch('/api/...')  with:
+>   fetch(`${import.meta.env.VITE_API_URL}/api/spider`)
+>   ```
+>   Then `.env.development` sets `VITE_API_URL=` (empty string — Vite proxy handles it) and `.env.production` sets `VITE_API_URL=https://api.yourapp.com`.
+> - As the API grows beyond a single endpoint, consider adding an `/api` blueprint in Flask (`app.register_blueprint(api, url_prefix='/api')`). This makes Flask's routes match the frontend's prefix natively, eliminating the rewrite entirely and removing the mismatch that caused this bug.
+> - A `pytest` test that calls `GET /api/spider` (wrong path) and asserts a 404 would have caught this immediately and served as living documentation of the routing contract.
 
 ### Milestone achieved
 
@@ -404,9 +464,57 @@ Commit **`backend/tests/conftest.py`** and **`backend/tests/test_api.py`** toget
 
 ---
 
+> **Strong architectural decisions in Phase 2 — senior dev assessment**
+>
+> These decisions hold up under scrutiny. Each has a real failure mode it prevents, not just a theoretical one.
+>
+> **1. `VALID_*` sets derived from `df`, not hardcoded literals**
+> `VALID_ARMS`, `VALID_DOSES`, `VALID_TUMORS` are computed from the cleaned DataFrame at startup. If the CSV gains a new arm or dose, validation updates automatically with no code change. Hardcoding `{'A', 'B'}` would create a maintenance trap — the literals drift silently from the data.
+> Failure mode to watch: these sets are computed once at import time. If the dataset were ever swapped at runtime (multi-tenant, per-request data), the sets would be stale immediately. The assumption that data never changes while the server runs is implicit and nowhere enforced.
+>
+> **2. `filtered = df` reference, `.copy()` only on the result slice**
+> Boolean indexing returns a new object — it never mutates `df`. The `.copy()` is deferred until the small result slice, right before `days` and `change` are mutated. This avoids copying the full 58-row frame on every request.
+> Failure mode to watch: this holds only as long as no one writes `df[mask] = something` in the route. One in-place assignment corrupts every subsequent request. There is no guardrail — it is a convention, not enforced by the type system.
+>
+> **3. Fixture patches `VALID_*` sets alongside `df` in conftest**
+> Most developers patch only `df` and miss that `VALID_*` were computed from the real CSV at import time. Patching just `df` leaves validation running against real-data values — tests pass for the wrong reason. Patching all four attributes makes tests hermetic: the route sees exactly what the fixture defines.
+> Failure mode to watch: if a new module-level variable is derived from `df` in future (e.g. `VALID_SUBJECTS`), the fixture won't patch it unless someone remembers to add it. Every new derived constant needs a manual fixture update — the pattern does not scale automatically.
+>
+> **4. `RESPONSE_COLUMNS: Final` — annotation + tests as the real enforcement**
+> `Final` signals to static analysis (mypy, pyright) that this variable must not be reassigned. The actual runtime enforcement is `test_returns_exactly_six_columns` and `test_does_not_leak_extra_columns`, which assert the exact response key set. Neither alone is sufficient: `Final` has zero runtime effect; tests don't run in production. Together they cover both layers.
+
+> **Known improvements before Phase 3**
+>
+> These are not bugs — the app works correctly. They are specific failure modes that would surface under real production conditions:
+>
+> 1. **Two fetches on `Visualisation` mount** — `useEffect` #1 fetches unfiltered data just to derive `totalPatients`; `useEffect` #2 fetches filtered data for the chart. The `buildPatientSeries` transform runs twice on initial load: once thrown away (for `.length`), once kept (for `useMemo`). If fetch #1 fails silently, `totalPatients` stays 0 with no visible error to the user. Fix: one unfiltered fetch on mount, derive total from it, then let filter changes trigger the filtered fetch.
+> 2. **`/ai-filter` has no rate limiting** — no auth, no request cap, no query length limit. One script hammering this endpoint runs up Anthropic API costs with no protection.
+> 3. **`df` is a global in-memory singleton** — works for one Flask worker. Under `gunicorn --workers 4`, each worker forks its own copy. Any future write or reload operation would produce inconsistent state across workers.
+> 4. **No authentication** — all patient data is returned by an unauthenticated `GET /spider`. Irrelevant for this assignment; a HIPAA violation in any real clinical deployment.
+
 ## Phase 3: Frontend data pipeline (Steps 12–16)
 
 **Goal:** Build the frontend data layer before writing any UI. The API returns flat rows — one row per patient per timepoint. Plotly needs per-patient trace objects. This phase writes the pure transformation function that bridges the two, locks its behaviour with a Vitest suite, and separates rendering constants from data logic before Phase 5 makes everything visual.
+
+> **Architecture decisions — senior dev rationale**
+>
+> **Why this phase exists before any UI**
+> If the data layer is wrong, every component that consumes it is wrong. Building and locking `buildPatientSeries` in isolation before Phase 5 means the chart is just wiring — not debugging. The transform is tested independently of React, Plotly, and the DOM.
+>
+> **Separation of concerns: `transformData.js` vs `constants.js`**
+> `COLOR_MAP` was moved out of `transformData.js` because a data transform has no business knowing about hex colours. More critically, `FilterPanel` (Phase 6) also consumes `COLOR_MAP` — if it lived in the transform module, a rendering constant would be imported from a data module, a coupling that makes both harder to refactor independently. `constants.js` is the single source of truth for rendering constants.
+>
+> **`colorKey` computed once, stored on the patient object**
+> The alternative — reconstructing the key string inside `SpiderPlot` on every render — is untestable at the transform layer. A change in arm format would silently produce grey lines with no error. Computing it once in the transform and cross-checking it against `COLOR_MAP` in tests means this contract is verified before the chart exists. Production improvement: TypeScript's `keyof typeof COLOR_MAP` makes this a compile-time error instead of a test-time catch.
+>
+> **Function naming: `groupBySubject` → `buildPatientSeries`**
+> The original name described one of three responsibilities. The function also injects a synthetic baseline and sorts patients. A name that lies about what a function does is the first thing that misleads a future reader. Names are the first documentation.
+>
+> **Algorithm: O(n+m) not O(n×m)**
+> Baseline injection originally scanned all rows per patient. A `Set` built in one pass reduces lookups to O(1). Inconsequential at 58 rows — the point is reaching for the correct algorithm by default, not because the scale demands it.
+>
+> **Test suite: 7 → 13 after review**
+> The first draft had tests that only checked counts (`toHaveLength`), a sort test that compared output against itself, and no cross-check between `colorKey` and `COLOR_MAP`. A test that cannot catch a specific failure mode is false confidence. Every test added maps to a concrete bug it would catch.
 
 ### What was built
 
@@ -440,6 +548,26 @@ The first draft exported `COLOR_MAP` from `transformData.js`. A transform module
 
 **`colorKey` computed once in `buildPatientSeries`, stored on the patient object**
 Each patient in the output carries a `colorKey` field: `` `ARM ${row.arm} ${row.dose} mg` ``. This matches `COLOR_MAP`'s key format exactly. Without this, `SpiderPlot` (Phase 5) would have to reconstruct the key string inline every time it renders a trace. That reconstruction is untestable in the transform suite — if the arm field format ever changed (e.g. `'A'` → `'Arm A'`), the chart would silently render with no colors and no error. Computing `colorKey` once in the transform and verifying it against `COLOR_MAP` in tests catches this class of bug before the chart exists.
+
+> **Senior Dev Note — TypeScript would eliminate this class of bug entirely:**
+> In JS, `colorKey` is just a `string` — nothing connects it to `COLOR_MAP` at the type level. The test is the only enforcement. In TypeScript you would do:
+> ```ts
+> // constants.ts
+> export const COLOR_MAP = {
+>   'ARM A 1800 mg': '#FFB3C1',
+>   'ARM A 3000 mg': '#C2185B',
+>   'ARM B 1800 mg': '#90CAF9',
+>   'ARM B 3000 mg': '#1565C0',
+> } as const
+>
+> export type ColorKey = keyof typeof COLOR_MAP
+> // ColorKey = 'ARM A 1800 mg' | 'ARM A 3000 mg' | 'ARM B 1800 mg' | 'ARM B 3000 mg'
+> ```
+> ```ts
+> // transformData.ts
+> colorKey: `ARM ${row.arm} ${dose} mg` as ColorKey  // must match one of the four
+> ```
+> Now `COLOR_MAP[patient.colorKey]` can never return `undefined` — the compiler knows the key is valid. A typo like `'ARM A 1800mg'` becomes a red underline in the editor before the file is saved, not a grey line on the chart at runtime. The test still stays — TypeScript runs at compile time, not at runtime. If an unexpected arm value came in from the API, the type checker wouldn't catch it. Both layers cover different failure modes.
 
 **O(n+m) baseline injection, not O(n×m)**
 The original baseline check used `rows.some(r => r.subject_id === patient.subject_id && Number(r.days) === 0)` inside the per-patient `forEach`. For each patient, this scans all rows — O(patients × rows). The correct approach builds a `Set` of day-zero subject IDs in one O(n) pass before the patient loop, then does O(1) `.has()` lookups per patient. Total: O(rows + patients). For 10 patients and 58 rows it makes no practical difference, but O(n×m) is the wrong algorithm when O(n+m) is trivial.
