@@ -12,6 +12,7 @@ Design decisions:
 """
 
 import json
+import re
 import anthropic
 
 
@@ -47,20 +48,18 @@ def build_system_prompt(
 
 def _strip_optional_json_fence(raw: str) -> str:
     """
-    Haiku occasionally wraps JSON in ``` or ```json fences despite the system prompt.
-    Strip a single wrapping fence if present; otherwise return raw trimmed text.
+    Extract JSON content from raw LLM text.
+    Handles: plain JSON, ```json fences, ``` fences, multiline JSON bodies,
+    trailing spaces on fence line. Falls back to raw stripped text so
+    json.loads produces the error on genuinely invalid input.
     """
     text = raw.strip()
-    if not text.startswith('```'):
+    if text.startswith('{'):
         return text
-    lines = text.splitlines()
-    if len(lines) < 2:
-        return text
-    if lines[0].strip().startswith('```'):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == '```':
-        lines = lines[:-1]
-    return '\n'.join(lines).strip()
+    m = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return text
 
 
 def parse_llm_response(raw: str) -> dict:
