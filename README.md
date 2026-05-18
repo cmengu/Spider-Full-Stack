@@ -102,7 +102,19 @@ flowchart TD
 
 ---
 
-### Design Decisions
+### Architecture Decisions
+
+| # | Decision | Why |
+|---|----------|-----|
+| 1 | **Monorepo with Vite proxy** — Flask and React live in one repo; a single `npm run dev` starts both servers and Vite forwards `/api/*` to Flask, stripping the prefix | No CORS configuration needed in development; the frontend always uses relative paths and is never coupled to a port number |
+| 2 | **LLM as structured extractor, not decision-maker** — Claude Haiku's only job is converting free-text into a 3-key JSON dict; every actual decision (validation, rejection, filter application) is made by deterministic Python code | LLM non-determinism is contained to one step; the rest of the pipeline is fully testable without API calls and produces predictable 400/500 responses |
+| 3 | **Coordinator pattern for filter state** — `Visualisation.jsx` owns all filter state; the AI filter and manual dropdowns both call the same `setSelectedArm / setSelectedDose / setSelectedTumor` setters | No synchronisation logic between the two input methods; any future consumer of filter state (URL params, export, a second chart) gets it automatically |
+| 4 | **`ai_filter.py` as a pure, Flask-free module** — the AI logic has no import of Flask; `parse_filter_query` takes the Anthropic client as a dependency injection parameter rather than creating it internally | The module is fully unit-testable without a running server; the LLM backend is swappable (a regex parser could replace it) without touching `app.py` |
+| 5 | **Single source of truth for valid filter values** — `VALID_ARMS`, `VALID_DOSES`, `VALID_TUMORS` are derived from the live DataFrame at startup and passed into both HTTP route validation and the AI filter's system prompt | The model can only name values that actually exist in the data; adding a new arm to the CSV propagates automatically to both validation and the LLM's awareness on the next server start |
+
+---
+
+### Implementation Details
 
 | # | Decision | Tradeoff |
 |---|----------|----------|
