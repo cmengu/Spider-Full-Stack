@@ -3,8 +3,7 @@
 Clinical trial tumour-size spider plot with AI-powered natural language filtering.  
 Flask + Pandas backend · Vite + React frontend · Plotly chart · Claude Haiku AI filter.
 
-## add evals 
-
+![Dashboard](docs/dashboard.png)
 
 ---
 
@@ -51,11 +50,65 @@ cd frontend && npx vitest run               # vitest
 
 ## Architecture
 
+Full-stack pipeline: CSV on disk → Flask/Pandas API → Vite dev proxy → React coordinator → Plotly spider plot. The AI filter is a separate branch that translates natural language into the same filter state the manual dropdowns write.
+
+```mermaid
+flowchart TD
+    CSV[(spiderplot.csv\n58 rows · 10 patients)]
+
+    subgraph Backend ["Backend — Flask · Pandas · ai_filter.py"]
+        direction TB
+        DATA[data.py\nload_data · type coerce]
+        VALID[VALID_ARMS · VALID_DOSES · VALID_TUMORS\nderived from df at startup]
+        SPIDER["GET /spider\n?arms= &doses= &tumor_types=\npandas boolean filter → JSON rows"]
+
+        subgraph AIModule ["AI Filter — ai_filter.py"]
+            PROMPT[build_system_prompt\nlive valid-set injection]
+            HAIKU[Claude Haiku\nJSON-only structured extractor]
+            PARSE[parse_llm_response\nfence-strip · JSONDecodeError→ValueError]
+            VALIDATE[validate_filters\nnormalise · set-membership · all-all-all guard]
+            AIEP["POST /ai-filter\nValueError→400 · Exception→500"]
+            PROMPT --> HAIKU --> PARSE --> VALIDATE --> AIEP
+        end
+
+        DATA --> VALID
+        VALID --> SPIDER
+        VALID --> PROMPT
+    end
+
+    subgraph Frontend ["Frontend — Vite · React · Plotly"]
+        VIS["Visualisation.jsx\ncoordinator · owns all filter state\nAbortController fetch on filter change"]
+        FP["FilterPanel.jsx\nAI textarea · dropdowns · SoC mPFS input"]
+        TRANSFORM["buildPatientSeries\ndays→weeks · baseline inject · colorKey"]
+        SP["SpiderPlot.jsx\nPlotly traces · PD≥20% · PR≤-30% · SoC mPFS · hover"]
+        VIS -->|"state + callbacks"| FP
+        VIS --> TRANSFORM --> SP
+    end
+
+    PROXY["Vite Dev Proxy\n/api/* → localhost:5001\nstrips /api prefix"]
+
+    CSV --> DATA
+    SPIDER -->|"JSON rows"| PROXY
+    AIEP -->|"filter dict {arm · dose · tumor_type}"| PROXY
+    PROXY -->|"rows"| VIS
+    PROXY -->|"validated filters"| VIS
+    FP -->|"NL query · POST /api/ai-filter"| PROXY
+    FP -->|"dropdown / SoC change"| VIS
+
+    style Backend fill:#1e3a5f,color:#fff,stroke:#4a9eff
+    style AIModule fill:#0d2035,color:#fff,stroke:#2a6aaf
+    style Frontend fill:#1a3a2a,color:#fff,stroke:#4aff88
+```
+
+---
+
+### Design Decisions
+
 Six decisions that shaped the codebase — each with the tradeoff it leaves open.
 
 ---
 
-### 1. Hermetic test fixtures: patch all four module constants, not just `df`
+#### 1. Hermetic test fixtures: patch all four module constants, not just `df`
 
 `app.py` derives `VALID_ARMS`, `VALID_DOSES`, and `VALID_TUMORS` from `df` once at import time, before any test runs. Patching only `df` in a fixture leaves those three validation sets pointing at the real CSV's values for the entire test session.
 
@@ -74,7 +127,7 @@ Without this, a test adding `arm='C'` to the fixture would still be rejected by 
 
 ---
 
-### 2. O(n+m) baseline injection — correct algorithm at 58 rows
+#### 2. O(n+m) baseline injection — correct algorithm at 58 rows
 
 `buildPatientSeries` needs to know which patients have a real day-0 row so it can inject a synthetic baseline only for those who don't.
 
@@ -100,7 +153,7 @@ At 58 rows the difference is microseconds. The decision is about defaulting to t
 
 ---
 
-### 3. `AbortController` without state calls on the abort path
+#### 3. `AbortController` without state calls on the abort path
 
 React 18 `StrictMode` deliberately mounts every component twice in development to surface side effects. Without cleanup, the first fetch fires, React unmounts, React remounts, the second fetch fires — both call `setRows` on an instance that no longer exists.
 
@@ -123,25 +176,25 @@ Only the non-abort error path and the success path update state. The abort path 
 
 ---
 
-### 4. `VALID_ARMS / VALID_DOSES / VALID_TUMORS` derived from `df` at startup
+#### 4. `VALID_ARMS / VALID_DOSES / VALID_TUMORS` derived from `df` at startup
 
 The set of legal filter values is a fact about the dataset, not a constant in the application code.
 
 ```python
 VALID_ARMS  = {str(a) for a in df['arm'].unique()}
 VALID_DOSES = {int(d) for d in df['dose'].unique()}
-VALID_TUMORS = {str(t) for t in df['tumor_type'].unique()}
+VALID_TUMORS = {str(t) for t in df['tumor_type'].unique()
 ```
 
 If the CSV gains a third arm, `VALID_ARMS` updates automatically on the next server start. A hardcoded `VALID_ARMS = {'A', 'B'}` would reject valid data silently — returning 400 for a value that exists in the database — with no error visible to the developer.
 
 The sets are also used in the AI filter's system prompt via `build_system_prompt`. When the valid sets update, the prompt updates too — the LLM is always constrained to values that actually exist in the data.
 
-**Tradeoff:** `FilterPanel.jsx` hardcodes `ARM_OPTIONS`, `DOSE_OPTIONS`, and `TUMOR_OPTIONS`. The backend validates against live data; the frontend dropdowns are frozen to what was known at write time. If the CSV gains a new arm, backend validation passes but the dropdown has no option for it — users can only reach the new arm via the AI filter or a direct URL. This is the biggest inconsistency in the current codebase. Fixing it requires either an `/api/meta` endpoint returning valid filter values, or accepting that the frontend is a fixed UI for a fixed dataset.
+**Tradeoff:** `FilterPanel.jsx` hardcodes `ARM_OPTIONS`, `DOSE_OPTIONS`, and `TUMOR_OPTIONS`. The backend validates against live data; the frontend dropdowns are frozen to what was known at write time. If the CSV gains a new arm, backend validation passes but the dropdown has no option for it — users can only reach the new arm via the AI filter or a direct URL. Fixing this requires an `/api/meta` endpoint or accepting the frontend is a fixed UI for a fixed dataset.
 
 ---
 
-### 5. `colorKey` → `COLOR_MAP` cross-module contract test
+#### 5. `colorKey` → `COLOR_MAP` cross-module contract test
 
 `buildPatientSeries` produces a `colorKey` string per patient (e.g. `'ARM A 1800 mg'`). `SpiderPlot` looks that key up in `COLOR_MAP` from `constants.js`. These two files are authored independently and have no compile-time relationship.
 
