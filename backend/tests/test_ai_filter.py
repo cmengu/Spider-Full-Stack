@@ -185,9 +185,21 @@ def test_parse_llm_response_strips_markdown_json_fence():
     }
 
 
+def test_parse_llm_response_strips_multiline_markdown_json_fence():
+    # Multiline JSON body inside fence — regression guard for regex extraction.
+    # The single-line test above passes even with a split-based extractor;
+    # this one requires re.DOTALL to match across newlines inside the fence.
+    raw = '```json\n{"arm": "A", "dose": "all",\n  "tumor_type": "HNSCC"}\n```'
+    assert parse_llm_response(raw) == {
+        'arm': 'A',
+        'dose': 'all',
+        'tumor_type': 'HNSCC',
+    }
+
+
 def test_parse_llm_response_non_json_raises_valueerror_not_jsondecodeerror():
     # Must raise ValueError (caught by endpoint) not JSONDecodeError (falls to 500)
-    with pytest.raises(ValueError, match='non-JSON'):
+    with pytest.raises(ValueError, match='Please try again'):
         parse_llm_response('Here is your filter: {"arm": "A"}')
 
 
