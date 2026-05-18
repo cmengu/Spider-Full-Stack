@@ -58,9 +58,6 @@ export default function Landing() {
     <main className="px-8 py-12">
       <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-brand">{STUDY_LABEL}</p>
       <h1 className="mb-2">Clinical Trial Explorer</h1>
-      <p className="mb-10 text-gray-500">
-        Tumour size change from baseline — spider plot dashboard
-      </p>
 
       <div className="mb-10 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <SummaryCard title="Unique Patients" value={String(stats.patients)} />
