@@ -73,7 +73,7 @@ def parse_llm_response(raw: str) -> dict:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(
-            f'Model returned non-JSON output: {raw[:120]!r}'
+            'AI filter received an unexpected response. Please try again.'
         ) from exc
 
 
