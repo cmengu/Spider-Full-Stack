@@ -1,9 +1,14 @@
-# Spider Plot Dashboard — Hummingbird Take-Home
+<h1 align="center">Spider Plot Dashboard</h1>
 
-Clinical trial tumour-size spider plot with AI-powered natural language filtering.  
-Flask + Pandas backend · Vite + React frontend · Plotly chart · Claude Haiku AI filter.
+<p align="center">A clinical-trial spider plot of tumour-size change over time, with a natural-language filter that turns a typed query into arm, dose and tumour-type selections.</p>
 
-![Dashboard](docs/dashboard.png)
+<p align="center"><img src="docs/dashboard.png" alt="Dashboard with an AI filter box and arm, dose and tumour-type dropdowns on the left, and a spider plot of ten patients' percent tumour change over weeks on treatment, with PD at 20 percent, PR at minus 30 percent and a standard-of-care median PFS line at 10.5 weeks" width="860"></p>
+
+<p align="center">The dashboard on the committed <code>backend/spiderplot.csv</code> (58 measurements, 10 patients), no filters applied.</p>
+
+## Why
+
+A spider plot of ten patients is hard to slice by arm, dose and tumour type without clicking through dropdowns. Here you can type "HNSCC patients in Arm B" and the same dropdown state is set for you. The model only extracts three values; Python code validates them and applies the filter, and queries it cannot express as arm, dose or tumour type are rejected.
 
 ---
 
@@ -17,7 +22,7 @@ Flask + Pandas backend · Vite + React frontend · Plotly chart · Claude Haiku 
 | Node | 18+ |
 | npm | 9+ |
 
-> macOS/Linux only. The `npm run dev` script calls `backend/venv/bin/flask` directly — on Windows that path does not exist.
+macOS/Linux only. The `npm run dev` script calls `backend/venv/bin/flask` directly — on Windows that path does not exist.
 
 ```bash
 # Clone
@@ -50,55 +55,12 @@ cd frontend && npx vitest run               # vitest
 
 ## Architecture
 
-Full-stack pipeline: CSV on disk → Flask/Pandas API → Vite dev proxy → React coordinator → Plotly spider plot. The AI filter is a separate branch that translates natural language into the same filter state the manual dropdowns write.
+CSV on disk, a Flask/Pandas API, the Vite dev proxy, a React coordinator, then a Plotly spider plot. The AI filter is a separate branch that writes the same filter state the manual dropdowns write.
 
-```mermaid
-flowchart TD
-    CSV[(spiderplot.csv\n58 rows · 10 patients)]
-
-    subgraph Backend ["Backend — Flask · Pandas · ai_filter.py"]
-        direction TB
-        DATA[data.py\nload_data · type coerce]
-        VALID[VALID_ARMS · VALID_DOSES · VALID_TUMORS\nderived from df at startup]
-        SPIDER["GET /spider\n?arms= &doses= &tumor_types=\npandas boolean filter → JSON rows"]
-
-        subgraph AIModule ["AI Filter — ai_filter.py"]
-            PROMPT[build_system_prompt\nlive valid-set injection]
-            HAIKU[Claude Haiku\nJSON-only structured extractor]
-            PARSE[parse_llm_response\nfence-strip · JSONDecodeError→ValueError]
-            VALIDATE[validate_filters\nnormalise · set-membership · all-all-all guard]
-            AIEP["POST /ai-filter\nValueError→400 · Exception→500"]
-            PROMPT --> HAIKU --> PARSE --> VALIDATE --> AIEP
-        end
-
-        DATA --> VALID
-        VALID --> SPIDER
-        VALID --> PROMPT
-    end
-
-    subgraph Frontend ["Frontend — Vite · React · Plotly"]
-        VIS["Visualisation.jsx\ncoordinator · owns all filter state\nAbortController fetch on filter change"]
-        FP["FilterPanel.jsx\nAI textarea · dropdowns · SoC mPFS input"]
-        TRANSFORM["buildPatientSeries\ndays→weeks · baseline inject · colorKey"]
-        SP["SpiderPlot.jsx\nPlotly traces · PD≥20% · PR≤-30% · SoC mPFS · hover"]
-        VIS -->|"state + callbacks"| FP
-        VIS --> TRANSFORM --> SP
-    end
-
-    PROXY["Vite Dev Proxy\n/api/* → localhost:5001\nstrips /api prefix"]
-
-    CSV --> DATA
-    SPIDER -->|"JSON rows"| PROXY
-    AIEP -->|"filter dict {arm · dose · tumor_type}"| PROXY
-    PROXY -->|"rows"| VIS
-    PROXY -->|"validated filters"| VIS
-    FP -->|"NL query · POST /api/ai-filter"| PROXY
-    FP -->|"dropdown / SoC change"| VIS
-
-    style Backend fill:#1e3a5f,color:#fff,stroke:#4a9eff
-    style AIModule fill:#0d2035,color:#fff,stroke:#2a6aaf
-    style Frontend fill:#1a3a2a,color:#fff,stroke:#4aff88
-```
+- `GET /spider?arms=&doses=&tumor_types=` filters the DataFrame and returns JSON rows.
+- `POST /ai-filter` builds a system prompt from the valid arm, dose and tumour values, asks Claude Haiku for a JSON object, strips code fences, validates it against those values, and returns `{arm, dose, tumor_type}`. A bad query or model output gives 400; any other failure gives 500.
+- `Visualisation.jsx` owns all filter state and refetches `/spider` on change, aborting the previous request.
+- `buildPatientSeries` converts days to weeks, injects a day-0 baseline and assigns a colour key; `SpiderPlot.jsx` draws the traces, the PD ≥20% and PR ≤-30% lines and the SoC mPFS line.
 
 ---
 
@@ -141,7 +103,7 @@ flowchart TD
 ## Troubleshooting
 
 **Flask won't start — `spiderplot.csv not found`**  
-The CSV must be at `backend/spiderplot.csv`. It is already committed — if it is missing, re-clone or copy: `cp assignment/spiderplot.csv backend/`.
+The CSV must be at `backend/spiderplot.csv`. It is committed; if it is missing, restore it with `git checkout -- backend/spiderplot.csv`.
 
 **`npm run dev` fails with `flask: command not found`**  
 The script calls `backend/venv/bin/flask`. Set up the venv first: `cd backend && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`.
